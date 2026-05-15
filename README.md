@@ -1,8 +1,9 @@
 # FlowForge
 
-FlowForge is a small fulfillment workflow prototype built with FastAPI and
-Temporal. It models a real order flow with inventory reservation, payment
-processing, warehouse updates, and saga-style compensation when something fails.
+FlowForge is a small distributed fulfillment workflow prototype built with
+FastAPI and Temporal. It models a real order flow with inventory reservation,
+payment processing, warehouse updates, and saga-style compensation when
+something fails.
 
 The goal is not to hide failures. The goal is to make them recoverable.
 
@@ -47,6 +48,7 @@ what should happen next.
 | Models | Pydantic | Request, response, and state schemas |
 | State | In-memory stores | Prototype storage for inventory, payments, warehouse, and order summaries |
 | Package manager | uv | Dependency and test runner |
+| Containers | Docker Compose | Local Temporal, API, worker, starter, and test services |
 
 ## Repository Layout
 
@@ -69,6 +71,7 @@ flowforge/
 ├── tests/
 │   ├── test_api.py
 │   ├── test_compensation.py
+│   ├── test_docker_config.py
 │   ├── test_store.py
 │   └── test_workflow.py
 ├── config.py                  # Environment-based runtime settings
@@ -99,7 +102,53 @@ or running a missing refund should not corrupt the prototype state.
 
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/)
-- [Temporal CLI](https://docs.temporal.io/cli)
+- Docker and Docker Compose, for the containerized local setup
+- [Temporal CLI](https://docs.temporal.io/cli), for the non-Docker setup
+
+## Docker Setup
+
+The easiest way to run the full local stack is Docker Compose. It starts:
+
+- Temporal dev server on `localhost:7233`
+- Temporal UI on `http://localhost:8233`
+- FlowForge API on `http://localhost:8000`
+- FlowForge Temporal worker on the `fulfillment-queue` task queue
+
+Start the stack:
+
+```bash
+docker compose up --build
+```
+
+Run the test service in Docker:
+
+```bash
+docker compose --profile test run --rm tests
+```
+
+Run the one-shot demo starter against the Docker stack:
+
+```bash
+docker compose --profile demo run --rm starter
+```
+
+The project image has separate Dockerfile targets:
+
+| Target | Purpose |
+| --- | --- |
+| `api` | Runs `uvicorn flowforge.api.app:app` |
+| `worker` | Runs the Temporal worker |
+| `starter` | Starts a sample workflow and waits for the result |
+| `tests` | Runs `pytest -q` |
+
+The Docker services use `TEMPORAL_HOST=temporal:7233` so containers connect to
+Temporal over the Compose network. Local processes outside Docker should use the
+default `localhost:7233`.
+
+## Manual Setup
+
+Use this path if you want to run the app directly on your machine without
+Docker.
 
 ### Install Dependencies
 
@@ -264,13 +313,21 @@ Returns orders, inventory, payments, and warehouse records in one response.
 
 ## Running Tests
 
+Run the local Python test suite:
+
 ```bash
 uv run pytest
 ```
 
-The current suite covers the API surface, in-memory stores, workflow state, and
-compensation ordering. It does not yet run a full Temporal integration test with
-a live worker and Temporal server.
+Run the containerized test target:
+
+```bash
+docker compose --profile test run --rm tests
+```
+
+The current suite covers the API surface, in-memory stores, workflow state,
+compensation ordering, and Docker/Compose configuration. It does not yet run a
+full Temporal integration test with a live worker and Temporal server.
 
 ## Configuration
 
@@ -290,14 +347,13 @@ production concerns are intentionally out of scope for now:
 - state is in memory and disappears when the process exits
 - PostgreSQL models are only placeholders
 - payment and inventory integrations are local mocks
-- there is no Docker Compose environment yet
 - there are no live Temporal integration tests yet
 - the legacy hello-world activity still exists beside the fulfillment flow
 
 ## Good Next Steps
 
 - add a real persistence layer for order, inventory, payment, and warehouse state
-- add a `docker-compose.yml` for Temporal, API, worker, and backing services
+- add a persistent database service to the Docker Compose environment
 - move mock integrations behind interfaces that can be swapped in tests
 - add live Temporal integration tests for successful and compensated workflows
 - remove the legacy demo activity once it is no longer useful
