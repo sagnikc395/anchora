@@ -1,102 +1,151 @@
 # FlowForge
 
-A distributed workflow engine built to handle multi-step transactional processes reliably — even when things go wrong.
+FlowForge is a small fulfillment workflow prototype built with FastAPI and
+Temporal. It models a real order flow with inventory reservation, payment
+processing, warehouse updates, and saga-style compensation when something fails.
+
+The goal is not to hide failures. The goal is to make them recoverable.
+
+## What It Does
+
+An order moves through four steps:
+
+1. Check inventory
+2. Reserve inventory
+3. Process payment
+4. Update the warehouse
+
+If a later step fails, FlowForge runs compensating actions in reverse order. For
+example, if payment succeeds but the warehouse update fails, the workflow refunds
+the payment and releases the reserved stock.
+
+Temporal owns the durable workflow execution. FastAPI gives clients a simple HTTP
+surface for starting orders and checking state.
 
 ## Why This Exists
 
-Traditional request/response APIs struggle with multi-step processes. Consider what can go wrong in an order fulfillment flow:
+Multi-step business operations are awkward in a normal request/response API. A
+single HTTP request can return a success or failure, but the real world is often
+messier:
 
-- Payment succeeds, but the warehouse update times out
-- The payment processor goes down mid-transaction
-- A partial failure leaves your data in an inconsistent state
+- a payment provider accepts the charge and then the warehouse service times out
+- inventory is reserved, but the next system in the chain is unavailable
+- a worker process crashes halfway through an order
+- a retry runs the same side effect more than once
 
-FlowForge solves this with the **Saga Pattern** backed by [Temporal.io](https://temporal.io). Each step is durable, every failure triggers a compensating action, and the system self-heals — without you writing any retry or rollback logic by hand.
+FlowForge demonstrates how to handle that class of problem with the saga pattern.
+Every side effect has an undo step, and the workflow records enough state to know
+what should happen next.
 
 ## Tech Stack
 
-| Layer | Technology | Purpose |
-|---|---|---|
-| API | FastAPI + Uvicorn | Order intake, async HTTP |
-| Orchestration | Temporal.io (Python SDK) | Durable workflow execution |
-| Payments | Stripe Mock | Payment processing simulation |
-| Database | PostgreSQL | Warehouse inventory state |
-| Async Runtime | Python AsyncIO | Non-blocking activity execution |
-| Containerization | Docker + Docker Compose | Local dev environment |
+| Layer | Technology | Notes |
+| --- | --- | --- |
+| API | FastAPI | Starts workflows and exposes read endpoints |
+| Workflow engine | Temporal Python SDK | Runs durable order workflows |
+| Worker | Temporal Worker | Executes workflow activities |
+| Models | Pydantic | Request, response, and state schemas |
+| State | In-memory stores | Prototype storage for inventory, payments, warehouse, and order summaries |
+| Package manager | uv | Dependency and test runner |
 
-## Project Structure
+## Repository Layout
 
-```
+```text
 flowforge/
 ├── api/
-│   ├── app.py               # FastAPI app — order endpoints
-│   └── schemas.py           # Pydantic request/response models
-├── workflows/
-│   ├── workflows.py         # Core Temporal workflow definition
-│   └── compensation.py      # Saga compensation logic
+│   ├── app.py                 # FastAPI application and HTTP endpoints
+│   └── schemas.py             # API schema exports
 ├── activities/
-│   ├── activities.py        # Legacy hello-world demo activity
-│   └── order.py             # Fulfillment activities + compensations
+│   ├── order.py               # Order activities and compensation activities
+│   └── activities.py          # Legacy demo activity
+├── workflows/
+│   ├── workflows.py           # FulfillmentWorkflow
+│   └── compensation.py        # Saga compensation helper
 ├── worker/
-│   └── worker.py            # Temporal worker entrypoint
-├── config.py                # Shared Temporal host/task queue settings
-├── models.py                # Shared Pydantic workflow models
-├── store.py                 # In-memory inventory/payment/warehouse state
+│   └── worker.py              # Temporal worker entrypoint
 ├── mocks/
-│   ├── stripe_mock.py       # Thin wrapper over the in-memory payment mock
-│   └── inventory_api.py     # Thin wrapper over the in-memory inventory mock
-├── db/
-│   └── models.py            # Placeholder persistence models
+│   ├── inventory_api.py       # Thin inventory mock wrapper
+│   └── stripe_mock.py         # Thin payment mock wrapper
 ├── tests/
-│   ├── test_workflow.py     # Placeholder workflow tests
-│   └── test_compensation.py # Placeholder compensation tests
-├── Dockerfile
-└── pyproject.toml
+│   ├── test_api.py
+│   ├── test_compensation.py
+│   ├── test_store.py
+│   └── test_workflow.py
+├── config.py                  # Environment-based runtime settings
+├── models.py                  # Shared Pydantic models
+└── store.py                   # In-memory state stores
 ```
 
 ## How Compensation Works
 
-Each activity registers a **compensating action** before it executes. If any downstream step fails, Temporal unwinds the saga in reverse order — so a failed warehouse update will automatically trigger a payment refund and a stock release, in the right order, every time.
+The workflow registers compensation before it runs each side-effecting step.
+That matters because an activity can mutate external state and then fail before
+returning cleanly.
+
+Current compensation behavior:
+
+| Step | Side effect | Compensation |
+| --- | --- | --- |
+| `reserve_inventory` | reserves stock by order id | `release_inventory` |
+| `process_payment` | charges by idempotency key | `refund_payment_by_idempotency_key` |
+| `update_warehouse` | writes a warehouse record | `revert_warehouse` |
+
+Compensations are intentionally idempotent where possible. Retrying a reservation
+or running a missing refund should not corrupt the prototype state.
 
 ## Getting Started
 
 ### Prerequisites
 
 - Python 3.13+
-- Docker & Docker Compose
-- [Temporal CLI](https://docs.temporal.io/cli) (for local dev server)
+- [uv](https://docs.astral.sh/uv/)
+- [Temporal CLI](https://docs.temporal.io/cli)
 
-### 1. Clone & Install
+### Install Dependencies
 
 ```bash
-git clone https://github.com/yourusername/flowforge.git
-cd flowforge
-python -m venv venv && source venv/bin/activate
-pip install fastapi[standard] temporalio
+uv sync
 ```
 
-### 2. Start Temporal Server (local)
+### Start Temporal
 
 ```bash
 temporal server start-dev
 ```
 
-This starts a local Temporal server with a Web UI at `http://localhost:8233`.
+Temporal's local UI will be available at:
 
-### 3. Start the Worker
-
-```bash
-python -m flowforge.worker.worker
+```text
+http://localhost:8233
 ```
 
-The worker polls Temporal for workflow and activity tasks.
+### Start the Worker
 
-### 4. Start the FastAPI Server
+Run this in a separate terminal:
 
 ```bash
-uvicorn flowforge.api.app:app --reload --port 8000
+uv run python -m flowforge.worker.worker
 ```
 
-### 5. Place an Order
+The worker listens on the configured task queue and executes workflow activities.
+
+### Start the API
+
+Run this in another terminal:
+
+```bash
+uv run uvicorn flowforge.api.app:app --reload --port 8000
+```
+
+The API will be available at:
+
+```text
+http://localhost:8000
+```
+
+## Try the Order Flow
+
+Create an order:
 
 ```bash
 curl -X POST http://localhost:8000/orders \
@@ -109,130 +158,153 @@ curl -X POST http://localhost:8000/orders \
   }'
 ```
 
-### 6. Simulate a Failure
+Example response:
 
-Set `FAIL_AT` to trigger compensation at a specific step:
-
-```bash
-FAIL_AT=warehouse python -m flowforge.worker.worker
+```json
+{
+  "workflow_id": "order-ord_abc123",
+  "order_id": "ord_abc123",
+  "status": "started"
+}
 ```
 
-Watch the Temporal Web UI at `http://localhost:8233` — you'll see the payment refund and stock release fire automatically in reverse order.
+Check workflow status:
+
+```bash
+curl http://localhost:8000/orders/order-ord_abc123/status
+```
+
+Inspect the full in-memory engine snapshot:
+
+```bash
+curl http://localhost:8000/engine/snapshot
+```
+
+## Simulate Failures
+
+Set `FAIL_AT` on the worker process to force a failure after a named step:
+
+```bash
+FAIL_AT=warehouse uv run python -m flowforge.worker.worker
+```
+
+Supported values:
+
+| Value | Failure point |
+| --- | --- |
+| `inventory-check` | after inventory check |
+| `inventory` | after inventory reservation |
+| `payment` | after payment charge |
+| `warehouse` | after warehouse update |
+
+When a failure is injected after a side effect, the workflow should move into
+compensation and unwind the completed side effects in reverse order.
 
 ## API Reference
 
+### `GET /health`
+
+Basic API health check.
+
+```json
+{
+  "status": "ok"
+}
+```
+
 ### `POST /orders`
 
-Place a new order and kick off the fulfillment workflow.
+Starts a new fulfillment workflow.
 
-**Request**
+Request:
+
 ```json
 {
-  "product_id": "string",
-  "quantity": 1,
-  "customer_id": "string",
-  "payment_method": "string"
+  "product_id": "SKU-001",
+  "quantity": 2,
+  "customer_id": "cust-42",
+  "payment_method": "tok_visa",
+  "workflow_id": "optional-client-provided-id"
 }
 ```
 
-**Response**
+Response:
+
 ```json
 {
-  "workflow_id": "order-uuid-1234",
-  "status": "started",
-  "order_id": "ord_abc123"
+  "workflow_id": "optional-client-provided-id",
+  "order_id": "ord_abc123",
+  "status": "started"
 }
 ```
+
+### `GET /orders`
+
+Lists known orders from the in-memory workflow registry.
 
 ### `GET /orders/{workflow_id}/status`
 
-Poll the current state of a running or completed workflow.
+Queries Temporal for the current workflow state.
 
-**Response**
-```json
-{
-  "workflow_id": "order-uuid-1234",
-  "status": "completed | running | compensating | failed",
-  "steps_completed": ["check_stock", "process_payment", "update_warehouse"],
-  "compensation_triggered": false
-}
-```
+### `GET /inventory`
 
-## Key Design Decisions
+Returns the current inventory snapshot.
 
-**Durable Execution** — Temporal persists every workflow step to an event log. If the worker crashes mid-execution, the workflow resumes exactly where it left off on restart.
+### `GET /payments/{charge_id}`
 
-**Idempotency** — Every activity is safe to retry. Processing the same payment twice with the same idempotency key won't double-charge.
+Returns a payment record by charge id.
 
-**Saga Compensation** — Failures never leave the system in a broken state. Every side effect has a registered undo operation that Temporal calls automatically.
+### `GET /warehouse`
 
-**Non-blocking API** — `POST /orders` uses `start_workflow` (not `execute_workflow`), so the HTTP response returns immediately with a `workflow_id`. Workflows can run for minutes; clients poll for status separately.
+Returns warehouse records.
 
-**Async Activities** — All I/O (external APIs, DB writes) runs as non-blocking async activities, keeping throughput high under concurrent load.
+### `GET /engine/snapshot`
 
-**Visibility** — Every workflow run, activity execution, and compensation event is visible in the Temporal Web UI with full event history.
-
-## Current State
-
-The repository now contains a real fulfillment prototype, not just the original Temporal hello-world:
-
-- `POST /orders` starts `FulfillmentWorkflow` asynchronously and returns a `workflow_id`
-- `GET /orders/{workflow_id}/status` queries workflow state directly from Temporal
-- The workflow runs `check_inventory`, `reserve_inventory`, `process_payment`, and `update_warehouse`
-- Compensation runs in reverse order using `release_inventory`, `refund_payment`, and `revert_warehouse`
-- `FAIL_AT` can inject a failure at `inventory-check`, `inventory`, `payment`, or `warehouse`
-
-What remains incomplete:
-
-- persistence is still in-memory, not PostgreSQL-backed
-- mocks are simplistic and not external-service substitutes
-- tests are placeholders, not comprehensive Temporal workflow tests
-- there is no `docker-compose.yml` yet, despite the original design docs mentioning one
-- the legacy hello-world files are still present alongside the new implementation
-
-This means the project is aligned with the intended workflow design, but it is still a prototype and not production-ready.
-
-## Latest Challenges
-
-- The code compiles, but runtime validation could not be completed in-session because the active Python environment was missing `fastapi` and `temporalio`
-- The documentation had drifted behind the codebase and still described the old `SayHelloWorkflow` scaffold
-- The documented file layout and the actual repository layout did not match, so some compatibility modules had to be added
-- A proper persistence layer was deferred to keep the implementation self-contained and runnable without introducing an unfinished database stack
-- End-to-end verification still depends on running a Temporal dev server and installing project dependencies locally
+Returns orders, inventory, payments, and warehouse records in one response.
 
 ## Running Tests
 
 ```bash
-# Unit tests (no Temporal server needed)
 uv run pytest
 ```
 
-Temporal integration tests are not present yet; add them under `flowforge/tests/integration`
-when the worker and Temporal dev server are part of the test environment.
+The current suite covers the API surface, in-memory stores, workflow state, and
+compensation ordering. It does not yet run a full Temporal integration test with
+a live worker and Temporal server.
 
-## Environment Variables
+## Configuration
 
 | Variable | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `TEMPORAL_HOST` | `localhost:7233` | Temporal server address |
 | `TASK_QUEUE` | `fulfillment-queue` | Temporal task queue name |
-| `DATABASE_URL` | `sqlite:///./flowforge.db` | SQLAlchemy DB connection string |
-| `STRIPE_SECRET_KEY` | `sk_test_mock` | Stripe API key (mock in dev) |
-| `FAIL_AT` | `""` | Inject a failure at a named step to test compensation |
+| `MAX_CONCURRENT_ACTIVITIES` | `100` | Worker activity concurrency |
+| `MAX_CONCURRENT_WORKFLOW_TASKS` | `100` | Worker workflow task concurrency |
+| `FAIL_AT` | empty | Optional failure injection point |
 
-## Deployment
+## Current Limitations
 
-Deployment scaffolding is still pending. The original design called for a `docker-compose.yml` that would start:
+FlowForge is still a prototype. The core saga behavior is real, but several
+production concerns are intentionally out of scope for now:
 
-- Temporal server + Postgres
-- FlowForge API
-- FlowForge Worker
-- Temporal Web UI
+- state is in memory and disappears when the process exits
+- PostgreSQL models are only placeholders
+- payment and inventory integrations are local mocks
+- there is no Docker Compose environment yet
+- there are no live Temporal integration tests yet
+- the legacy hello-world activity still exists beside the fulfillment flow
 
-That file does not exist in the repository yet. For now, run the Temporal server, worker, and API as separate local processes. For production, deploy the API and Worker as separate services pointing to a managed [Temporal Cloud](https://temporal.io/cloud) instance or a self-hosted Temporal cluster.
+## Good Next Steps
+
+- add a real persistence layer for order, inventory, payment, and warehouse state
+- add a `docker-compose.yml` for Temporal, API, worker, and backing services
+- move mock integrations behind interfaces that can be swapped in tests
+- add live Temporal integration tests for successful and compensated workflows
+- remove the legacy demo activity once it is no longer useful
 
 ## References
 
-- [Temporal.io Python SDK Docs](https://docs.temporal.io/develop/python)
-- [Saga Pattern — Microsoft Architecture Guide](https://learn.microsoft.com/en-us/azure/architecture/reference-architectures/saga/saga)
-- [FastAPI Async Docs](https://fastapi.tiangolo.com/async/)
+- [Temporal Python SDK](https://docs.temporal.io/develop/python)
+- [Temporal CLI](https://docs.temporal.io/cli)
+- [FastAPI](https://fastapi.tiangolo.com/)
+- [Saga pattern overview](https://learn.microsoft.com/en-us/azure/architecture/reference-architectures/saga/saga)
