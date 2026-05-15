@@ -61,7 +61,7 @@ Each activity registers a **compensating action** before it executes. If any dow
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.13+
 - Docker & Docker Compose
 - [Temporal CLI](https://docs.temporal.io/cli) (for local dev server)
 
@@ -204,11 +204,11 @@ This means the project is aligned with the intended workflow design, but it is s
 
 ```bash
 # Unit tests (no Temporal server needed)
-pytest tests/ -v
-
-# Integration tests (requires a running Temporal server)
-TEMPORAL_HOST=localhost:7233 pytest tests/integration/ -v
+uv run pytest
 ```
+
+Temporal integration tests are not present yet; add them under `flowforge/tests/integration`
+when the worker and Temporal dev server are part of the test environment.
 
 ## Environment Variables
 

@@ -19,15 +19,19 @@ async def check_inventory(product_id: str, quantity: int) -> None:
 
 
 @activity.defn
-async def reserve_inventory(product_id: str, quantity: int) -> None:
-    await inventory_store.reserve_stock(product_id, quantity)
+async def reserve_inventory(
+    product_id: str, quantity: int, reservation_id: str | None = None
+) -> None:
+    await inventory_store.reserve_stock(product_id, quantity, reservation_id)
     if _should_fail("inventory"):
         raise RuntimeError("Injected failure after inventory reservation")
 
 
 @activity.defn
-async def release_inventory(product_id: str, quantity: int) -> None:
-    await inventory_store.release_stock(product_id, quantity)
+async def release_inventory(
+    product_id: str, quantity: int, reservation_id: str | None = None
+) -> None:
+    await inventory_store.release_stock(product_id, quantity, reservation_id)
 
 
 @activity.defn
@@ -44,6 +48,11 @@ async def process_payment(
 @activity.defn
 async def refund_payment(charge_id: str) -> None:
     await payment_store.refund(charge_id)
+
+
+@activity.defn
+async def refund_payment_by_idempotency_key(idempotency_key: str) -> None:
+    await payment_store.refund_by_idempotency_key(idempotency_key)
 
 
 @activity.defn

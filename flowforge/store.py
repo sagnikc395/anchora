@@ -17,6 +17,12 @@ class _InventoryState:
     reserved: int = 0
 
 
+@dataclass(frozen=True)
+class _ReservationState:
+    product_id: str
+    quantity: int
+
+
 class InventoryStore:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
@@ -25,6 +31,7 @@ class InventoryStore:
             "SKU-002": _InventoryState(available=10),
             "SKU-003": _InventoryState(available=50),
         }
+        self._reservations: dict[str, _ReservationState] = {}
 
     async def check_stock(self, product_id: str, quantity: int) -> None:
         async with self._lock:
@@ -32,16 +39,36 @@ class InventoryStore:
             if item.available < quantity:
                 raise ValueError(f"Insufficient stock for {product_id}")
 
-    async def reserve_stock(self, product_id: str, quantity: int) -> None:
+    async def reserve_stock(
+        self, product_id: str, quantity: int, reservation_id: str | None = None
+    ) -> None:
         async with self._lock:
+            if reservation_id is not None and reservation_id in self._reservations:
+                return
             item = self._items.setdefault(product_id, _InventoryState())
             if item.available < quantity:
                 raise ValueError(f"Insufficient stock for {product_id}")
             item.available -= quantity
             item.reserved += quantity
+            if reservation_id is not None:
+                self._reservations[reservation_id] = _ReservationState(
+                    product_id=product_id,
+                    quantity=quantity,
+                )
 
-    async def release_stock(self, product_id: str, quantity: int) -> None:
+    async def release_stock(
+        self, product_id: str, quantity: int, reservation_id: str | None = None
+    ) -> None:
         async with self._lock:
+            if reservation_id is not None:
+                reservation = self._reservations.pop(reservation_id, None)
+                if reservation is None:
+                    return
+                item = self._items.setdefault(reservation.product_id, _InventoryState())
+                item.available += reservation.quantity
+                item.reserved -= reservation.quantity
+                return
+
             item = self._items.setdefault(product_id, _InventoryState())
             if item.reserved < quantity:
                 raise ValueError(f"Cannot release more than reserved for {product_id}")
@@ -91,6 +118,13 @@ class PaymentStore:
             record = self._charges_by_id.get(charge_id)
             if record is None:
                 raise ValueError(f"Unknown charge {charge_id}")
+            record.status = "refunded"
+
+    async def refund_by_idempotency_key(self, idempotency_key: str) -> None:
+        async with self._lock:
+            record = self._charges_by_key.get(idempotency_key)
+            if record is None:
+                return
             record.status = "refunded"
 
     async def get(self, charge_id: str) -> PaymentRecordView | None:

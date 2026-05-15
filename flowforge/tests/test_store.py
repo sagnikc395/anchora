@@ -22,6 +22,29 @@ def test_inventory_store_reserves_and_releases_stock() -> None:
     asyncio.run(run())
 
 
+def test_inventory_reservations_are_idempotent_and_safe_to_compensate() -> None:
+    async def run() -> None:
+        store = InventoryStore()
+
+        await store.release_stock("SKU-001", 5, "missing-reservation")
+        await store.reserve_stock("SKU-001", 5, "ord_1")
+        await store.reserve_stock("SKU-001", 5, "ord_1")
+
+        snapshot = await store.snapshot()
+        sku = next(item for item in snapshot if item.product_id == "SKU-001")
+        assert sku.available == 20
+        assert sku.reserved == 5
+
+        await store.release_stock("SKU-001", 5, "ord_1")
+        await store.release_stock("SKU-001", 5, "ord_1")
+        snapshot = await store.snapshot()
+        sku = next(item for item in snapshot if item.product_id == "SKU-001")
+        assert sku.available == 25
+        assert sku.reserved == 0
+
+    asyncio.run(run())
+
+
 def test_payment_store_is_idempotent() -> None:
     async def run() -> None:
         store = PaymentStore()
@@ -37,6 +60,21 @@ def test_payment_store_is_idempotent() -> None:
         refunded = await store.get(first)
         assert refunded is not None
         assert refunded.status == "refunded"
+
+    asyncio.run(run())
+
+
+def test_payment_store_can_refund_by_idempotency_key() -> None:
+    async def run() -> None:
+        store = PaymentStore()
+
+        await store.refund_by_idempotency_key("missing-order")
+        charge_id = await store.charge(1000, "tok_visa", "ord_1")
+        await store.refund_by_idempotency_key("ord_1")
+
+        payment = await store.get(charge_id)
+        assert payment is not None
+        assert payment.status == "refunded"
 
     asyncio.run(run())
 

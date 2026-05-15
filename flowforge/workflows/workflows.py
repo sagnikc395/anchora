@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import timedelta
 
 from temporalio import workflow
@@ -41,32 +40,32 @@ class FulfillmentWorkflow:
                 order.product_id,
                 order.quantity,
             )
+            compensator.add(
+                "release_inventory",
+                order.product_id,
+                order.quantity,
+                order_id,
+            )
             await self._run_step(
                 "reserve_inventory",
                 order.product_id,
                 order.quantity,
-                compensator=compensator,
-                compensation_args=(order.product_id, order.quantity),
-                compensation_name="release_inventory",
+                order_id,
             )
-            payment = await self._run_step(
+            compensator.add("refund_payment_by_idempotency_key", order_id)
+            await self._run_step(
                 "process_payment",
                 order.customer_id,
                 amount,
                 order.payment_method,
                 order_id,
-                compensator=compensator,
-                compensation_name="refund_payment",
-                compensation_arg_factory=lambda result: (result.charge_id,),
             )
+            compensator.add("revert_warehouse", order_id)
             await self._run_step(
                 "update_warehouse",
                 order_id,
                 order.product_id,
                 order.quantity,
-                compensator=compensator,
-                compensation_args=(order_id,),
-                compensation_name="revert_warehouse",
             )
             self.state.status = "completed"
             self.state.record_event("workflow", "completed", "Fulfillment completed")
@@ -96,19 +95,9 @@ class FulfillmentWorkflow:
         self,
         step_name: str,
         *args: object,
-        compensator: SagaCompensator | None = None,
-        compensation_name: str | None = None,
-        compensation_args: tuple[object, ...] | None = None,
-        compensation_arg_factory: Callable[[object], tuple[object, ...]] | None = None,
     ):
         self.state.record_event(step_name, "started", f"{step_name} started")
         result = await self._activity(step_name, *args)
         self.state.steps_completed.append(step_name)
         self.state.record_event(step_name, "completed", f"{step_name} completed")
-        if compensator is not None and compensation_name is not None:
-            if compensation_arg_factory is not None:
-                args_to_register = compensation_arg_factory(result)
-            else:
-                args_to_register = compensation_args or ()
-            compensator.add(compensation_name, *args_to_register)
         return result
