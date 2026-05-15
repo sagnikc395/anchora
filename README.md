@@ -1,4 +1,4 @@
-# FlowForge
+# flowforge
 
 FlowForge is a small distributed fulfillment workflow prototype built with
 FastAPI and Temporal. It models a real order flow with inventory reservation,
