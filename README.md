@@ -1,6 +1,6 @@
 # FlowForge
 
-A distributed workflow engine built to handle multi-step transactional processes reliably — even when things go wrong.
+A distributed workflow engine built to handle multi-step transactional processes reliably , even when things go wrong.
 
 ## Why This Exists
 
