@@ -24,22 +24,25 @@ from flowforge.config import (
 from flowforge.workflows.workflows import FulfillmentWorkflow
 
 
+ORDER_ACTIVITIES = [
+    check_inventory,
+    reserve_inventory,
+    release_inventory,
+    process_payment,
+    refund_payment,
+    refund_payment_by_idempotency_key,
+    update_warehouse,
+    revert_warehouse,
+]
+
+
 async def main() -> None:
     client = await Client.connect(TEMPORAL_HOST)
     worker = Worker(
         client,
         task_queue=TASK_QUEUE,
         workflows=[FulfillmentWorkflow],
-        activities=[
-            check_inventory,
-            reserve_inventory,
-            release_inventory,
-            process_payment,
-            refund_payment,
-            refund_payment_by_idempotency_key,
-            update_warehouse,
-            revert_warehouse,
-        ],
+        activities=ORDER_ACTIVITIES,
         max_concurrent_activities=MAX_CONCURRENT_ACTIVITIES,
         max_concurrent_workflow_tasks=MAX_CONCURRENT_WORKFLOW_TASKS,
     )

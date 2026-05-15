@@ -2,7 +2,12 @@ from fastapi.testclient import TestClient
 
 from flowforge.api.app import app
 from flowforge.models import WorkflowState
-from flowforge.store import payment_store, warehouse_store, workflow_registry
+from flowforge.store import (
+    payment_store,
+    reset_runtime_stores,
+    warehouse_store,
+    workflow_registry,
+)
 
 
 class _FakeHandle:
@@ -29,6 +34,9 @@ class _FakeClient:
 
 
 def test_order_lifecycle_and_engine_snapshot(monkeypatch) -> None:
+    import asyncio
+
+    asyncio.run(reset_runtime_stores())
     fake_client = _FakeClient()
 
     async def fake_get_temporal_client():
@@ -69,9 +77,10 @@ def test_order_lifecycle_and_engine_snapshot(monkeypatch) -> None:
 
 
 def test_payment_and_warehouse_endpoints() -> None:
-    client = TestClient(app)
-
     import asyncio
+
+    asyncio.run(reset_runtime_stores())
+    client = TestClient(app)
 
     async def seed() -> str:
         seeded_charge_id = await payment_store.charge(1000, "tok_visa", "api-test-charge")

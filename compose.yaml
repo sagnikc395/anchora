@@ -32,6 +32,9 @@ services:
     environment:
       TEMPORAL_HOST: temporal:7233
       TASK_QUEUE: fulfillment-queue
+      DATABASE_URL: sqlite:////data/flowforge.sqlite3
+    volumes:
+      - flowforge-state:/data
     ports:
       - "8000:8000"
     depends_on:
@@ -45,6 +48,9 @@ services:
     environment:
       TEMPORAL_HOST: temporal:7233
       TASK_QUEUE: fulfillment-queue
+      DATABASE_URL: sqlite:////data/flowforge.sqlite3
+    volumes:
+      - flowforge-state:/data
     depends_on:
       temporal:
         condition: service_healthy
@@ -77,3 +83,6 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
+
+volumes:
+  flowforge-state:

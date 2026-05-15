@@ -95,3 +95,18 @@ def test_warehouse_and_registry_snapshots() -> None:
         assert orders[0].status == "completed"
 
     asyncio.run(run())
+
+
+def test_store_state_persists_to_sqlite_file(tmp_path) -> None:
+    async def run() -> None:
+        db_path = tmp_path / "flowforge.sqlite3"
+        payments = PaymentStore(db_path)
+
+        charge_id = await payments.charge(2500, "tok_visa", "ord_persist")
+
+        reloaded = PaymentStore(db_path)
+        payment = await reloaded.get(charge_id)
+        assert payment is not None
+        assert payment.idempotency_key == "ord_persist"
+
+    asyncio.run(run())

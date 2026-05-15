@@ -4,7 +4,7 @@ import os
 from temporalio import activity
 
 from flowforge.models import PaymentResult, WarehouseUpdate
-from flowforge.store import inventory_store, payment_store, warehouse_store
+from flowforge.integrations import runtime_integrations
 
 
 def _should_fail(step: str) -> bool:
@@ -13,7 +13,7 @@ def _should_fail(step: str) -> bool:
 
 @activity.defn
 async def check_inventory(product_id: str, quantity: int) -> None:
-    await inventory_store.check_stock(product_id, quantity)
+    await runtime_integrations.inventory.check_stock(product_id, quantity)
     if _should_fail("inventory-check"):
         raise RuntimeError("Injected failure after inventory check")
 
@@ -22,7 +22,9 @@ async def check_inventory(product_id: str, quantity: int) -> None:
 async def reserve_inventory(
     product_id: str, quantity: int, reservation_id: str | None = None
 ) -> None:
-    await inventory_store.reserve_stock(product_id, quantity, reservation_id)
+    await runtime_integrations.inventory.reserve_stock(
+        product_id, quantity, reservation_id
+    )
     if _should_fail("inventory"):
         raise RuntimeError("Injected failure after inventory reservation")
 
@@ -31,7 +33,9 @@ async def reserve_inventory(
 async def release_inventory(
     product_id: str, quantity: int, reservation_id: str | None = None
 ) -> None:
-    await inventory_store.release_stock(product_id, quantity, reservation_id)
+    await runtime_integrations.inventory.release_stock(
+        product_id, quantity, reservation_id
+    )
 
 
 @activity.defn
@@ -39,32 +43,34 @@ async def process_payment(
     customer_id: str, amount: int, payment_method: str, idempotency_key: str
 ) -> PaymentResult:
     del customer_id
-    charge_id = await payment_store.charge(amount, payment_method, idempotency_key)
+    result = await runtime_integrations.payment.charge(
+        amount, payment_method, idempotency_key
+    )
     if _should_fail("payment"):
         raise RuntimeError("Injected failure after payment")
-    return PaymentResult(charge_id=charge_id)
+    return result
 
 
 @activity.defn
 async def refund_payment(charge_id: str) -> None:
-    await payment_store.refund(charge_id)
+    await runtime_integrations.payment.refund(charge_id)
 
 
 @activity.defn
 async def refund_payment_by_idempotency_key(idempotency_key: str) -> None:
-    await payment_store.refund_by_idempotency_key(idempotency_key)
+    await runtime_integrations.payment.refund_by_idempotency_key(idempotency_key)
 
 
 @activity.defn
 async def update_warehouse(
     order_id: str, product_id: str, quantity: int
 ) -> WarehouseUpdate:
-    await warehouse_store.update(order_id, product_id, quantity)
+    result = await runtime_integrations.warehouse.update(order_id, product_id, quantity)
     if _should_fail("warehouse"):
         raise RuntimeError("Injected failure after warehouse update")
-    return WarehouseUpdate(order_id=order_id, product_id=product_id, quantity=quantity)
+    return result
 
 
 @activity.defn
 async def revert_warehouse(order_id: str) -> None:
-    await warehouse_store.revert(order_id)
+    await runtime_integrations.warehouse.revert(order_id)

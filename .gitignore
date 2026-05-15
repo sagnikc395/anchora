@@ -66,3 +66,6 @@ logs/
 
 # Temporal
 temporal-data/
+
+# FlowForge local state
+.flowforge/

@@ -46,7 +46,7 @@ what should happen next.
 | Workflow engine | Temporal Python SDK | Runs durable order workflows |
 | Worker | Temporal Worker | Executes workflow activities |
 | Models | Pydantic | Request, response, and state schemas |
-| State | In-memory stores | Prototype storage for inventory, payments, warehouse, and order summaries |
+| State | SQLite-backed stores | Persistent local storage for inventory, payments, warehouse, and order summaries |
 | Package manager | uv | Dependency and test runner |
 | Containers | Docker Compose | Local Temporal, API, worker, starter, and test services |
 
@@ -58,8 +58,8 @@ flowforge/
 │   ├── app.py                 # FastAPI application and HTTP endpoints
 │   └── schemas.py             # API schema exports
 ├── activities/
-│   ├── order.py               # Order activities and compensation activities
-│   └── activities.py          # Legacy demo activity
+│   └── order.py               # Order activities and compensation activities
+├── integrations.py            # Swappable inventory, payment, and warehouse interfaces
 ├── workflows/
 │   ├── workflows.py           # FulfillmentWorkflow
 │   └── compensation.py        # Saga compensation helper
@@ -76,7 +76,7 @@ flowforge/
 │   └── test_workflow.py
 ├── config.py                  # Environment-based runtime settings
 ├── models.py                  # Shared Pydantic models
-└── store.py                   # In-memory state stores
+└── store.py                   # SQLite-backed state stores
 ```
 
 ## How Compensation Works
@@ -113,6 +113,7 @@ The easiest way to run the full local stack is Docker Compose. It starts:
 - Temporal UI on `http://localhost:8233`
 - FlowForge API on `http://localhost:8000`
 - FlowForge Temporal worker on the `fulfillment-queue` task queue
+- Persistent FlowForge state in the `flowforge-state` Docker volume
 
 Start the stack:
 
@@ -136,7 +137,7 @@ The project image has separate Dockerfile targets:
 
 | Target | Purpose |
 | --- | --- |
-| `api` | Runs `uvicorn flowforge.api.app:app` |
+| `api` | Runs `python main.py api` |
 | `worker` | Runs the Temporal worker |
 | `starter` | Starts a sample workflow and waits for the result |
 | `tests` | Runs `pytest -q` |
@@ -144,6 +145,10 @@ The project image has separate Dockerfile targets:
 The Docker services use `TEMPORAL_HOST=temporal:7233` so containers connect to
 Temporal over the Compose network. Local processes outside Docker should use the
 default `localhost:7233`.
+
+The API and worker share `DATABASE_URL=sqlite:////data/flowforge.sqlite3` in
+Docker so workflow side effects and HTTP read endpoints see the same persisted
+state.
 
 ## Manual Setup
 
@@ -173,7 +178,7 @@ http://localhost:8233
 Run this in a separate terminal:
 
 ```bash
-uv run python -m flowforge.worker.worker
+uv run python main.py worker
 ```
 
 The worker listens on the configured task queue and executes workflow activities.
@@ -183,13 +188,19 @@ The worker listens on the configured task queue and executes workflow activities
 Run this in another terminal:
 
 ```bash
-uv run uvicorn flowforge.api.app:app --reload --port 8000
+uv run python main.py api --port 8000
 ```
 
 The API will be available at:
 
 ```text
 http://localhost:8000
+```
+
+You can also start the API and worker in one process:
+
+```bash
+uv run python main.py all
 ```
 
 ## Try the Order Flow
@@ -223,7 +234,7 @@ Check workflow status:
 curl http://localhost:8000/orders/order-ord_abc123/status
 ```
 
-Inspect the full in-memory engine snapshot:
+Inspect the full engine snapshot:
 
 ```bash
 curl http://localhost:8000/engine/snapshot
@@ -234,7 +245,7 @@ curl http://localhost:8000/engine/snapshot
 Set `FAIL_AT` on the worker process to force a failure after a named step:
 
 ```bash
-FAIL_AT=warehouse uv run python -m flowforge.worker.worker
+FAIL_AT=warehouse uv run python main.py worker
 ```
 
 Supported values:
@@ -289,7 +300,7 @@ Response:
 
 ### `GET /orders`
 
-Lists known orders from the in-memory workflow registry.
+Lists known orders from the persisted workflow registry.
 
 ### `GET /orders/{workflow_id}/status`
 
@@ -319,15 +330,21 @@ Run the local Python test suite:
 uv run pytest
 ```
 
+Run the live Temporal integration test against a running Temporal server:
+
+```bash
+RUN_TEMPORAL_INTEGRATION=1 uv run pytest flowforge/tests/test_temporal_integration.py
+```
+
 Run the containerized test target:
 
 ```bash
 docker compose --profile test run --rm tests
 ```
 
-The current suite covers the API surface, in-memory stores, workflow state,
-compensation ordering, and Docker/Compose configuration. It does not yet run a
-full Temporal integration test with a live worker and Temporal server.
+The default suite covers the API surface, persistent stores, workflow state,
+compensation ordering, and Docker/Compose configuration. The live Temporal test
+is opt-in so normal test runs do not require an external Temporal server.
 
 ## Configuration
 
@@ -337,26 +354,27 @@ full Temporal integration test with a live worker and Temporal server.
 | `TASK_QUEUE` | `fulfillment-queue` | Temporal task queue name |
 | `MAX_CONCURRENT_ACTIVITIES` | `100` | Worker activity concurrency |
 | `MAX_CONCURRENT_WORKFLOW_TASKS` | `100` | Worker workflow task concurrency |
+| `DATABASE_URL` | empty | Optional SQLite URL, for example `sqlite:////data/flowforge.sqlite3` |
+| `FLOWFORGE_DB_PATH` | `.flowforge/flowforge.sqlite3` | Local SQLite path when `DATABASE_URL` is empty |
 | `FAIL_AT` | empty | Optional failure injection point |
 
 ## Current Limitations
 
-FlowForge is still a prototype. The core saga behavior is real, but several
-production concerns are intentionally out of scope for now:
+FlowForge is still a prototype. The core saga behavior and persistence behavior
+are real, but several production concerns are intentionally out of scope for
+now:
 
-- state is in memory and disappears when the process exits
 - PostgreSQL models are only placeholders
 - payment and inventory integrations are local mocks
-- there are no live Temporal integration tests yet
-- the legacy hello-world activity still exists beside the fulfillment flow
+- the live Temporal tests are opt-in rather than part of every unit run
 
 ## Good Next Steps
 
-- add a real persistence layer for order, inventory, payment, and warehouse state
-- add a persistent database service to the Docker Compose environment
-- move mock integrations behind interfaces that can be swapped in tests
-- add live Temporal integration tests for successful and compensated workflows
-- remove the legacy demo activity once it is no longer useful
+- replace the placeholder PostgreSQL model layer with a production database adapter
+- add migrations for schema changes
+- add API authentication and request-level authorization
+- expose workflow cancellation and retry controls through the API
+- add observability for activity retries, compensation events, and workflow latency
 
 ## References
 

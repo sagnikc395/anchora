@@ -22,15 +22,15 @@ FROM runtime AS api
 
 EXPOSE 8000
 
-CMD ["uvicorn", "flowforge.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "main.py", "api"]
 
 FROM runtime AS worker
 
-CMD ["python", "-m", "flowforge.worker.worker"]
+CMD ["python", "main.py", "worker"]
 
 FROM runtime AS starter
 
-CMD ["python", "-m", "flowforge.api.starter"]
+CMD ["python", "main.py", "starter"]
 
 FROM deps AS tests
 
