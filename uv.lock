@@ -213,7 +213,7 @@ wheels = [
 ]
 
 [[package]]
-name = "flowforge"
+name = "anchora"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

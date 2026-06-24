@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
-from flowforge.api.app import app
-from flowforge.models import WorkflowState
-from flowforge.store import (
+from anchora.api.app import app
+from anchora.models import WorkflowState
+from anchora.store import (
     payment_store,
     reset_runtime_stores,
     warehouse_store,
@@ -14,9 +14,15 @@ class _FakeHandle:
     async def query(self, _query):
         return WorkflowState(
             order_id="ord_test",
+            agent_id="fulfillment-coordinator",
             status="completed",
             current_step="update_warehouse",
-            steps_completed=["check_inventory", "reserve_inventory", "process_payment", "update_warehouse"],
+            steps_completed=[
+                "check_inventory",
+                "reserve_inventory",
+                "process_payment",
+                "update_warehouse",
+            ],
         )
 
 
@@ -33,7 +39,7 @@ class _FakeClient:
         return _FakeHandle()
 
 
-def test_order_lifecycle_and_engine_snapshot(monkeypatch) -> None:
+def test_agent_workflow_lifecycle_and_engine_snapshot(monkeypatch) -> None:
     import asyncio
 
     asyncio.run(reset_runtime_stores())
@@ -42,12 +48,18 @@ def test_order_lifecycle_and_engine_snapshot(monkeypatch) -> None:
     async def fake_get_temporal_client():
         return fake_client
 
-    monkeypatch.setattr("flowforge.api.app.get_temporal_client", fake_get_temporal_client)
+    monkeypatch.setattr("anchora.api.app.get_temporal_client", fake_get_temporal_client)
     app.dependency_overrides = {}
     client = TestClient(app)
 
+    agents = client.get("/agents")
+    assert agents.status_code == 200
+    assert any(
+        agent["agent_id"] == "fulfillment-coordinator" for agent in agents.json()
+    )
+
     response = client.post(
-        "/orders",
+        "/workflows",
         json={
             "product_id": "SKU-001",
             "quantity": 2,
@@ -59,20 +71,25 @@ def test_order_lifecycle_and_engine_snapshot(monkeypatch) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["workflow_id"] == "wf-order-test"
+    assert body["agent_id"] == "fulfillment-coordinator"
 
-    status = client.get("/orders/wf-order-test/status")
+    status = client.get("/workflows/wf-order-test/status")
     assert status.status_code == 200
     assert status.json()["status"] == "completed"
+    assert status.json()["agent_id"] == "fulfillment-coordinator"
 
-    orders = client.get("/orders")
-    assert orders.status_code == 200
-    assert any(order["workflow_id"] == "wf-order-test" for order in orders.json())
+    workflows = client.get("/workflows")
+    assert workflows.status_code == 200
+    assert any(
+        workflow["workflow_id"] == "wf-order-test" for workflow in workflows.json()
+    )
 
     snapshot = client.get("/engine/snapshot")
     assert snapshot.status_code == 200
     assert any(
-        order["workflow_id"] == "wf-order-test" and order["status"] == "completed"
-        for order in snapshot.json()["orders"]
+        workflow["workflow_id"] == "wf-order-test"
+        and workflow["status"] == "completed"
+        for workflow in snapshot.json()["workflows"]
     )
 
 
@@ -85,7 +102,9 @@ def test_payment_and_warehouse_endpoints() -> None:
     async def seed() -> str:
         seeded_charge_id = await payment_store.charge(1000, "tok_visa", "api-test-charge")
         await warehouse_store.update("ord_api", "SKU-001", 1)
-        await workflow_registry.record("wf-api", "ord_api", "running")
+        await workflow_registry.record(
+            "wf-api", "ord_api", "fulfillment-coordinator", "running"
+        )
         return seeded_charge_id
 
     seeded_charge_id = asyncio.run(seed())

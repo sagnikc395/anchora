@@ -1,5 +1,5 @@
-from flowforge.models import WorkflowState
-from flowforge.workflows.compensation import SagaCompensator
+from anchora.models import WorkflowState
+from anchora.workflows.compensation import SagaCompensator
 
 
 def test_compensator_registers_actions() -> None:

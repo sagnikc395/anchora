@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from temporalio import workflow
 
-from flowforge.models import WorkflowState
+from anchora.agents import agent_for_step
+from anchora.models import WorkflowState
 
 
 @dataclass
@@ -23,11 +24,13 @@ class SagaCompensator:
 
     async def compensate(self, state: WorkflowState | None = None) -> None:
         for action in reversed(self._actions):
+            agent_id = agent_for_step(action.activity_name)
             if state is not None:
                 state.record_event(
                     action.activity_name,
                     "compensating",
                     f"Running compensation step {action.activity_name}",
+                    agent_id,
                 )
             await workflow.execute_activity(
                 action.activity_name,
@@ -39,4 +42,5 @@ class SagaCompensator:
                     action.activity_name,
                     "compensated",
                     f"Compensation step {action.activity_name} completed",
+                    agent_id,
                 )

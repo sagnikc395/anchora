@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flowforge.store import payment_store
+from anchora.store import payment_store
 
 
 async def charge(amount: int, payment_method: str, idempotency_key: str) -> str:

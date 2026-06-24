@@ -9,11 +9,11 @@ import pytest
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from flowforge.config import TEMPORAL_HOST
-from flowforge.models import OrderRequest
-from flowforge.store import reset_runtime_stores
-from flowforge.worker.worker import ORDER_ACTIVITIES
-from flowforge.workflows.workflows import FulfillmentWorkflow
+from anchora.config import TEMPORAL_HOST
+from anchora.models import OrderRequest
+from anchora.store import reset_runtime_stores
+from anchora.worker.worker import ORDER_ACTIVITIES
+from anchora.workflows.workflows import FulfillmentWorkflow
 
 
 pytestmark = pytest.mark.skipif(
@@ -26,7 +26,7 @@ def test_live_temporal_success_and_compensation(monkeypatch) -> None:
     async def run() -> None:
         await reset_runtime_stores()
         client = await Client.connect(TEMPORAL_HOST)
-        task_queue = f"flowforge-test-{os.getpid()}"
+        task_queue = f"anchora-test-{os.getpid()}"
         worker = Worker(
             client,
             task_queue=task_queue,
@@ -50,6 +50,7 @@ def test_live_temporal_success_and_compensation(monkeypatch) -> None:
                 execution_timeout=timedelta(seconds=30),
             )
             assert success.status == "completed"
+            assert success.agent_id == "fulfillment-coordinator"
 
             monkeypatch.setenv("FAIL_AT", "warehouse")
             failed = await client.execute_workflow(
@@ -60,6 +61,7 @@ def test_live_temporal_success_and_compensation(monkeypatch) -> None:
                 execution_timeout=timedelta(seconds=30),
             )
             assert failed.status == "failed"
+            assert failed.agent_id == "fulfillment-coordinator"
             assert failed.compensation_triggered is True
             assert "update_warehouse" in failed.steps_completed
         finally:

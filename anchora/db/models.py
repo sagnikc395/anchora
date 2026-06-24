@@ -10,9 +10,10 @@ class InventoryItem:
 
 
 @dataclass
-class Order:
+class AgentWorkflow:
     order_id: str
     workflow_id: str
+    agent_id: str
     status: str
 
 

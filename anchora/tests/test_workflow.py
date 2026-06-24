@@ -1,18 +1,23 @@
 import asyncio
 
-from flowforge.models import OrderRequest, WorkflowState
-from flowforge.workflows.workflows import FulfillmentWorkflow
+from anchora.models import OrderRequest, WorkflowState
+from anchora.workflows.workflows import FulfillmentWorkflow
 
 
 def test_workflow_state_records_events_and_current_step() -> None:
     state = WorkflowState(order_id="ord_123", status="running")
 
-    state.record_event("check_inventory", "started", "checking inventory")
-    state.record_event("check_inventory", "completed", "inventory ok")
+    state.record_event(
+        "check_inventory", "started", "checking inventory", "inventory-agent"
+    )
+    state.record_event(
+        "check_inventory", "completed", "inventory ok", "inventory-agent"
+    )
 
     assert state.current_step == "check_inventory"
     assert len(state.events) == 2
     assert state.events[0].status == "started"
+    assert state.events[0].agent_id == "inventory-agent"
     assert state.events[1].status == "completed"
     assert state.steps_completed == []
 
@@ -27,7 +32,7 @@ def test_workflow_compensates_side_effects_after_activity_failure(monkeypatch) -
         return None
 
     monkeypatch.setattr(
-        "flowforge.workflows.workflows.workflow.execute_activity",
+        "anchora.workflows.workflows.workflow.execute_activity",
         fake_execute_activity,
     )
     workflow = FulfillmentWorkflow()
@@ -45,7 +50,9 @@ def test_workflow_compensates_side_effects_after_activity_failure(monkeypatch) -
     )
 
     assert state.status == "failed"
+    assert state.agent_id == "fulfillment-coordinator"
     assert state.compensation_triggered is True
+    assert any(event.agent_id == "payment-agent" for event in state.events)
     assert calls == [
         ("check_inventory", ["SKU-001", 2]),
         ("reserve_inventory", ["SKU-001", 2, "ord_123"]),

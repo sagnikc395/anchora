@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from flowforge.store import inventory_store
+from anchora.store import inventory_store
 
 
 async def check_stock(product_id: str, quantity: int) -> None:

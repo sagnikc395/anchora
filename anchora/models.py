@@ -6,6 +6,12 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class AgentProfile(BaseModel):
+    agent_id: str
+    role: str
+    owns_steps: list[str] = Field(default_factory=list)
+
+
 class OrderRequest(BaseModel):
     product_id: str = Field(..., min_length=1)
     quantity: int = Field(..., gt=0)
@@ -14,21 +20,27 @@ class OrderRequest(BaseModel):
     workflow_id: str | None = None
 
 
-class OrderResponse(BaseModel):
+class AgentWorkflowResponse(BaseModel):
     workflow_id: str
     order_id: str
+    agent_id: str
     status: str
 
 
-class WorkflowStatusResponse(BaseModel):
+class AgentWorkflowStatusResponse(BaseModel):
     workflow_id: str
     order_id: str
+    agent_id: str
     status: str
     steps_completed: list[str]
     compensation_triggered: bool
     current_step: str | None = None
     failure_reason: str | None = None
     events: list["WorkflowEvent"] = Field(default_factory=list)
+
+
+OrderResponse = AgentWorkflowResponse
+WorkflowStatusResponse = AgentWorkflowStatusResponse
 
 
 class InventoryReservation(BaseModel):
@@ -70,6 +82,7 @@ class WarehouseRecordView(BaseModel):
 
 class WorkflowEvent(BaseModel):
     step: str
+    agent_id: str | None = None
     status: Literal["started", "completed", "failed", "compensating", "compensated"]
     message: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -77,6 +90,7 @@ class WorkflowEvent(BaseModel):
 
 class WorkflowState(BaseModel):
     order_id: str
+    agent_id: str = "fulfillment-coordinator"
     status: str
     current_step: str | None = None
     steps_completed: list[str] = Field(default_factory=list)
@@ -89,20 +103,28 @@ class WorkflowState(BaseModel):
         step: str,
         status: Literal["started", "completed", "failed", "compensating", "compensated"],
         message: str,
+        agent_id: str | None = None,
     ) -> None:
         self.current_step = step
-        self.events.append(WorkflowEvent(step=step, status=status, message=message))
+        self.events.append(
+            WorkflowEvent(step=step, agent_id=agent_id, status=status, message=message)
+        )
 
 
-class OrderSummary(BaseModel):
+class AgentWorkflowSummary(BaseModel):
     workflow_id: str
     order_id: str
+    agent_id: str
     status: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+OrderSummary = AgentWorkflowSummary
+
+
 class EngineSnapshot(BaseModel):
-    orders: list[OrderSummary]
+    agents: list[AgentProfile]
+    workflows: list[AgentWorkflowSummary]
     inventory: list[InventorySnapshot]
     payments: list[PaymentRecordView]
     warehouse: list[WarehouseRecordView]

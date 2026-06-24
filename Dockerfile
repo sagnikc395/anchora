@@ -15,7 +15,7 @@ RUN uv sync --frozen --no-install-project --no-dev
 
 FROM deps AS runtime
 
-COPY flowforge ./flowforge
+COPY anchora ./anchora
 COPY main.py ./
 
 FROM runtime AS api
@@ -36,7 +36,7 @@ FROM deps AS tests
 
 RUN uv sync --frozen --no-install-project --group dev
 
-COPY flowforge ./flowforge
+COPY anchora ./anchora
 COPY main.py ./
 
 CMD ["pytest", "-q"]

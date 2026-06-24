@@ -6,8 +6,9 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from flowforge.models import OrderRequest, WorkflowState
-    from flowforge.workflows.compensation import SagaCompensator
+    from anchora.agents import FULFILLMENT_AGENT_ID, agent_for_step
+    from anchora.models import OrderRequest, WorkflowState
+    from anchora.workflows.compensation import SagaCompensator
 
 
 ACTIVITY_TIMEOUT = timedelta(seconds=15)
@@ -22,7 +23,11 @@ ACTIVITY_RETRY_POLICY = RetryPolicy(
 @workflow.defn
 class FulfillmentWorkflow:
     def __init__(self) -> None:
-        self.state = WorkflowState(order_id="", status="pending")
+        self.state = WorkflowState(
+            order_id="",
+            agent_id=FULFILLMENT_AGENT_ID,
+            status="pending",
+        )
 
     @workflow.query
     def get_status(self) -> WorkflowState:
@@ -30,7 +35,11 @@ class FulfillmentWorkflow:
 
     @workflow.run
     async def run(self, order_id: str, order: OrderRequest) -> WorkflowState:
-        self.state = WorkflowState(order_id=order_id, status="running")
+        self.state = WorkflowState(
+            order_id=order_id,
+            agent_id=FULFILLMENT_AGENT_ID,
+            status="running",
+        )
         compensator = SagaCompensator()
         amount = order.quantity * 1000
 
@@ -68,7 +77,12 @@ class FulfillmentWorkflow:
                 order.quantity,
             )
             self.state.status = "completed"
-            self.state.record_event("workflow", "completed", "Fulfillment completed")
+            self.state.record_event(
+                "workflow",
+                "completed",
+                "Agent workflow completed",
+                FULFILLMENT_AGENT_ID,
+            )
             return self.state
         except Exception as exc:
             self.state.status = "compensating"
@@ -78,6 +92,7 @@ class FulfillmentWorkflow:
                 self.state.current_step or "workflow",
                 "failed",
                 f"Workflow failed: {exc}",
+                agent_for_step(self.state.current_step or "workflow"),
             )
             await compensator.compensate(self.state)
             self.state.status = "failed"
@@ -96,8 +111,13 @@ class FulfillmentWorkflow:
         step_name: str,
         *args: object,
     ):
-        self.state.record_event(step_name, "started", f"{step_name} started")
+        agent_id = agent_for_step(step_name)
+        self.state.record_event(
+            step_name, "started", f"{step_name} started", agent_id
+        )
         result = await self._activity(step_name, *args)
         self.state.steps_completed.append(step_name)
-        self.state.record_event(step_name, "completed", f"{step_name} completed")
+        self.state.record_event(
+            step_name, "completed", f"{step_name} completed", agent_id
+        )
         return result

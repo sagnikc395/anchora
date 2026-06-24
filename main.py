@@ -9,7 +9,7 @@ async def _serve_api(host: str, port: int) -> None:
     import uvicorn
 
     config = uvicorn.Config(
-        "flowforge.api.app:app",
+        "anchora.api.app:app",
         host=host,
         port=port,
         log_level="info",
@@ -19,13 +19,13 @@ async def _serve_api(host: str, port: int) -> None:
 
 
 async def _run_worker() -> None:
-    from flowforge.worker.worker import main as worker_main
+    from anchora.worker.worker import main as worker_main
 
     await worker_main()
 
 
 async def _run_starter() -> None:
-    from flowforge.api.starter import main as starter_main
+    from anchora.api.starter import main as starter_main
 
     await starter_main()
 
@@ -43,7 +43,7 @@ async def _run_all(host: str, port: int) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="FlowForge service entrypoint")
+    parser = argparse.ArgumentParser(description="Anchora service entrypoint")
     parser.add_argument(
         "service",
         choices=("api", "worker", "starter", "all"),

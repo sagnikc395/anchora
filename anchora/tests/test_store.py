@@ -1,6 +1,11 @@
 import asyncio
 
-from flowforge.store import InventoryStore, PaymentStore, WarehouseStore, WorkflowRegistry
+from anchora.store import (
+    AgentWorkflowRegistry,
+    InventoryStore,
+    PaymentStore,
+    WarehouseStore,
+)
 
 
 def test_inventory_store_reserves_and_releases_stock() -> None:
@@ -82,24 +87,25 @@ def test_payment_store_can_refund_by_idempotency_key() -> None:
 def test_warehouse_and_registry_snapshots() -> None:
     async def run() -> None:
         warehouse = WarehouseStore()
-        registry = WorkflowRegistry()
+        registry = AgentWorkflowRegistry()
 
         await warehouse.update("ord_1", "SKU-001", 2)
         await warehouse.revert("ord_1")
         records = await warehouse.snapshot()
         assert records[0].status == "reverted"
 
-        await registry.record("wf-1", "ord_1", "started")
-        await registry.record("wf-1", "ord_1", "completed")
-        orders = await registry.list()
-        assert orders[0].status == "completed"
+        await registry.record("wf-1", "ord_1", "fulfillment-coordinator", "started")
+        await registry.record("wf-1", "ord_1", "fulfillment-coordinator", "completed")
+        workflows = await registry.list()
+        assert workflows[0].status == "completed"
+        assert workflows[0].agent_id == "fulfillment-coordinator"
 
     asyncio.run(run())
 
 
 def test_store_state_persists_to_sqlite_file(tmp_path) -> None:
     async def run() -> None:
-        db_path = tmp_path / "flowforge.sqlite3"
+        db_path = tmp_path / "anchora.sqlite3"
         payments = PaymentStore(db_path)
 
         charge_id = await payments.charge(2500, "tok_visa", "ord_persist")

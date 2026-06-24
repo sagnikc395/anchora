@@ -5,10 +5,10 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flowforge.config import DATABASE_URL, FLOWFORGE_DB_PATH
-from flowforge.models import (
+from anchora.config import DATABASE_URL, ANCHORA_DB_PATH
+from anchora.models import (
+    AgentWorkflowSummary,
     InventorySnapshot,
-    OrderSummary,
     PaymentRecordView,
     WarehouseRecordView,
 )
@@ -32,10 +32,10 @@ def _db_path_from_url(database_url: str) -> str | None:
 
 
 def _runtime_db_path() -> str:
-    return _db_path_from_url(DATABASE_URL) or FLOWFORGE_DB_PATH
+    return _db_path_from_url(DATABASE_URL) or ANCHORA_DB_PATH
 
 
-class FlowForgeDatabase:
+class AnchoraDatabase:
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self.path = str(db_path)
         self._lock = asyncio.Lock()
@@ -97,9 +97,10 @@ class FlowForgeDatabase:
                 status TEXT NOT NULL CHECK (status IN ('applied', 'reverted'))
             );
 
-            CREATE TABLE IF NOT EXISTS orders (
+            CREATE TABLE IF NOT EXISTS agent_workflows (
                 workflow_id TEXT PRIMARY KEY,
                 order_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -133,7 +134,7 @@ class FlowForgeDatabase:
             DELETE FROM payments;
             DELETE FROM payment_counter;
             DELETE FROM warehouse_records;
-            DELETE FROM orders;
+            DELETE FROM agent_workflows;
             """
         )
         self._seed_defaults()
@@ -143,9 +144,9 @@ class InventoryStore:
     def __init__(
         self,
         db_path: str | Path = ":memory:",
-        database: FlowForgeDatabase | None = None,
+        database: AnchoraDatabase | None = None,
     ) -> None:
-        self._database = database or FlowForgeDatabase(db_path)
+        self._database = database or AnchoraDatabase(db_path)
 
     async def check_stock(self, product_id: str, quantity: int) -> None:
         async with self._database.lock:
@@ -276,9 +277,9 @@ class PaymentStore:
     def __init__(
         self,
         db_path: str | Path = ":memory:",
-        database: FlowForgeDatabase | None = None,
+        database: AnchoraDatabase | None = None,
     ) -> None:
-        self._database = database or FlowForgeDatabase(db_path)
+        self._database = database or AnchoraDatabase(db_path)
 
     async def charge(self, amount: int, payment_method: str, idempotency_key: str) -> str:
         async with self._database.lock:
@@ -353,9 +354,9 @@ class WarehouseStore:
     def __init__(
         self,
         db_path: str | Path = ":memory:",
-        database: FlowForgeDatabase | None = None,
+        database: AnchoraDatabase | None = None,
     ) -> None:
-        self._database = database or FlowForgeDatabase(db_path)
+        self._database = database or AnchoraDatabase(db_path)
 
     async def update(self, order_id: str, product_id: str, quantity: int) -> None:
         async with self._database.lock:
@@ -399,50 +400,58 @@ class WarehouseStore:
             ]
 
 
-class WorkflowRegistry:
+class AgentWorkflowRegistry:
     def __init__(
         self,
         db_path: str | Path = ":memory:",
-        database: FlowForgeDatabase | None = None,
+        database: AnchoraDatabase | None = None,
     ) -> None:
-        self._database = database or FlowForgeDatabase(db_path)
+        self._database = database or AnchoraDatabase(db_path)
 
-    async def record(self, workflow_id: str, order_id: str, status: str) -> None:
+    async def record(
+        self,
+        workflow_id: str,
+        order_id: str,
+        agent_id: str,
+        status: str,
+    ) -> None:
         async with self._database.lock:
             created_at = datetime.now(timezone.utc).isoformat()
             self._database.connection.execute(
                 """
-                INSERT INTO orders (workflow_id, order_id, status, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO agent_workflows
+                    (workflow_id, order_id, agent_id, status, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET
                     order_id = excluded.order_id,
+                    agent_id = excluded.agent_id,
                     status = excluded.status
                 """,
-                (workflow_id, order_id, status, created_at),
+                (workflow_id, order_id, agent_id, status, created_at),
             )
 
-    async def get(self, workflow_id: str) -> OrderSummary | None:
+    async def get(self, workflow_id: str) -> AgentWorkflowSummary | None:
         async with self._database.lock:
             row = self._database.connection.execute(
                 """
-                SELECT workflow_id, order_id, status, created_at
-                FROM orders
+                SELECT workflow_id, order_id, agent_id, status, created_at
+                FROM agent_workflows
                 WHERE workflow_id = ?
                 """,
                 (workflow_id,),
             ).fetchone()
-            return None if row is None else _order_from_row(row)
+            return None if row is None else _workflow_from_row(row)
 
-    async def list(self) -> list[OrderSummary]:
+    async def list(self) -> list[AgentWorkflowSummary]:
         async with self._database.lock:
             rows = self._database.connection.execute(
                 """
-                SELECT workflow_id, order_id, status, created_at
-                FROM orders
+                SELECT workflow_id, order_id, agent_id, status, created_at
+                FROM agent_workflows
                 ORDER BY workflow_id
                 """
             ).fetchall()
-            return [_order_from_row(row) for row in rows]
+            return [_workflow_from_row(row) for row in rows]
 
 
 def _payment_from_row(row: sqlite3.Row) -> PaymentRecordView:
@@ -455,20 +464,21 @@ def _payment_from_row(row: sqlite3.Row) -> PaymentRecordView:
     )
 
 
-def _order_from_row(row: sqlite3.Row) -> OrderSummary:
-    return OrderSummary(
+def _workflow_from_row(row: sqlite3.Row) -> AgentWorkflowSummary:
+    return AgentWorkflowSummary(
         workflow_id=row["workflow_id"],
         order_id=row["order_id"],
+        agent_id=row["agent_id"],
         status=row["status"],
         created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
-runtime_database = FlowForgeDatabase(_runtime_db_path())
+runtime_database = AnchoraDatabase(_runtime_db_path())
 inventory_store = InventoryStore(database=runtime_database)
 payment_store = PaymentStore(database=runtime_database)
 warehouse_store = WarehouseStore(database=runtime_database)
-workflow_registry = WorkflowRegistry(database=runtime_database)
+workflow_registry = AgentWorkflowRegistry(database=runtime_database)
 
 
 async def reset_runtime_stores() -> None:

@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 from temporalio import activity
 
-from flowforge.models import PaymentResult, WarehouseUpdate
-from flowforge.integrations import runtime_integrations
+from anchora.models import PaymentResult, WarehouseUpdate
+from anchora.integrations import runtime_integrations
 
 
 def _should_fail(step: str) -> bool:

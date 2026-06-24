@@ -5,7 +5,7 @@ import asyncio
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-from flowforge.activities.order import (
+from anchora.activities.order import (
     check_inventory,
     process_payment,
     refund_payment,
@@ -15,13 +15,13 @@ from flowforge.activities.order import (
     revert_warehouse,
     update_warehouse,
 )
-from flowforge.config import (
+from anchora.config import (
     MAX_CONCURRENT_ACTIVITIES,
     MAX_CONCURRENT_WORKFLOW_TASKS,
     TASK_QUEUE,
     TEMPORAL_HOST,
 )
-from flowforge.workflows.workflows import FulfillmentWorkflow
+from anchora.workflows.workflows import FulfillmentWorkflow
 
 
 ORDER_ACTIVITIES = [

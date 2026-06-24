@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from flowforge.models import PaymentResult, WarehouseUpdate
-from flowforge.store import inventory_store, payment_store, warehouse_store
+from anchora.models import PaymentResult, WarehouseUpdate
+from anchora.store import inventory_store, payment_store, warehouse_store
 
 
 class InventoryIntegration(Protocol):
