@@ -1,0 +1,9 @@
+provider:
+  name: groq                              # groq | huggingface
+  base_url: https://api.groq.com/openai/v1
+  model: llama-3.3-70b-versatile
+  max_tokens: 1024
+
+workflow:
+  max_retries: 2
+  retry_delay_ms: 500

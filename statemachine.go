@@ -23,29 +23,29 @@ const (
 
 var transitions = map[Status]map[Event]Status{
 	Pending: {
-		EventStart: Running 
+		EventStart: Running,
 	},
 	Running: {
 		EventSucceed: Succeeded,
-		EventFail: Failed,
+		EventFail:    Failed,
 	},
 	Failed: {
-		EventRetry: Retrying, 
+		EventRetry: Retrying,
 	},
 	Retrying: {
 		EventStart: Running,
-	}
+	},
 }
 
-func transition(current Status, event Event) (Status,error) {
+func transition(current Status, event Event) (Status, error) {
 	events, ok := transitions[current]
 	if !ok {
 		return current, fmt.Errorf("no transitions from %q", current)
 	}
 	next, ok := events[event]
 	if !ok {
-		return current, fmt.Errorf("event %q invalid from %q", event,current)
+		return current, fmt.Errorf("event %q invalid from %q", event, current)
 	}
 
-	return next,nil
+	return next, nil
 }
