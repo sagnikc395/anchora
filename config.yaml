@@ -1,8 +1,10 @@
 provider:
-  name: groq                              # groq | huggingface
-  base_url: https://api.groq.com/openai/v1
-  model: llama-3.3-70b-versatile
+  name: huggingface                       # huggingface | groq | openai
+  model: Qwen/Qwen3-Next-80B-A3B-Thinking
+  inference_provider: auto                # auto | hf-inference | other HF Inference Providers
   max_tokens: 1024
+  # api_key_env: HF_TOKEN                 # optional override for custom providers
+  # base_url:                             # optional dedicated Inference Endpoint URL
 
 workflow:
   max_retries: 2

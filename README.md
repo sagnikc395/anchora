@@ -1,29 +1,29 @@
 ## anchora
 
-anchora is a small Go workflow engine for running AI agent steps in order.
+anchora is a small Python workflow engine for running AI agent steps in order.
 
-The current example wires up two agents with the
-[`charm.land/fantasy`](https://charm.land/fantasy) library:
+The current example uses the
+[`smolagents`](https://huggingface.co/docs/smolagents/en/index) framework:
 
 - a research agent that answers a prompt about Go's `select` statement
-- a summarization agent that can use a `summarize` tool
+- a summarization agent that can use a local `summarize` tool
 
-Each workflow step has an ID, an agent, and a prompt. The workflow runs the
-steps sequentially, logs each output, and uses a simple state machine to track
-whether a step is pending, running, succeeded, failed, or retrying.
+Each workflow step has an ID, an agent, and a prompt. The workflow runs steps
+sequentially, logs each output, and uses a simple state machine to track whether
+a step is pending, running, succeeded, failed, or retrying.
 
 ## How it works
 
-1. `main.go` loads `.env`, reads `config.yaml`, and resolves the provider API
-   key from the configured provider name.
-2. It creates an OpenAI-compatible model provider using the configured base
-   URL, model, and token limit.
-3. It creates agents and optional tools.
+1. `anchora.cli` loads `.env`, reads `config.yaml`, and resolves the provider
+   API key from the configured provider name.
+2. It creates a smolagents model using the configured provider, model, token,
+   and token limit.
+3. It creates `smolagents.ToolCallingAgent` instances and optional tools.
 4. It builds a `Workflow` with ordered `Step` values.
-5. `Workflow.Run` executes each step.
-6. Each step calls `Agent.Generate`. On success, the response is stored and
-   logged. On failure, the state machine moves the step into retry states until
-   retries are exhausted.
+5. `Workflow.run` executes each step.
+6. Each step calls `agent.run`. On success, the response is stored and logged.
+   On failure, the state machine moves the step into retry states until retries
+   are exhausted.
 
 ## Workflow diagram
 
@@ -32,29 +32,28 @@ flowchart TD
     A[Start CLI] --> B[Load .env]
     B --> C[Read config.yaml]
     C --> D[Resolve provider API key]
-    D --> E[Create OpenAI-compatible provider]
-    E --> F[Create language model]
-    F --> G[Create tools and agents]
-    G --> H[Build ordered Workflow steps]
-    H --> I[Run next step]
+    D --> E[Create smolagents model]
+    E --> F[Create smolagents tools and agents]
+    F --> G[Build ordered Workflow steps]
+    G --> H[Run next step]
 
-    I --> J{State: pending}
-    J -->|start| K[State: running]
-    K --> L[Call Agent.Generate with step prompt]
-    L --> M{Generation succeeded?}
+    H --> I{State: pending}
+    I -->|start| J[State: running]
+    J --> K[Call agent.run with step prompt]
+    K --> L{Generation succeeded?}
 
-    M -->|yes| N[Store output]
-    N --> O[State: succeeded]
-    O --> P{More steps?}
-    P -->|yes| I
-    P -->|no| Q[Workflow complete]
+    L -->|yes| M[Store output]
+    M --> N[State: succeeded]
+    N --> O{More steps?}
+    O -->|yes| H
+    O -->|no| P[Workflow complete]
 
-    M -->|no| R[State: failed]
-    R --> S{Retries left?}
-    S -->|yes| T[State: retrying]
-    T --> U[Wait retry delay]
-    U -->|start| K
-    S -->|no| V[Return workflow error]
+    L -->|no| Q[State: failed]
+    Q --> R{Retries left?}
+    R -->|yes| S[State: retrying]
+    S --> T[Wait retry delay]
+    T -->|start| J
+    R -->|no| U[Return workflow error]
 ```
 
 ## Configuration
@@ -63,27 +62,67 @@ flowchart TD
 
 ```yaml
 provider:
-  name: groq
-  base_url: https://api.groq.com/openai/v1
-  model: llama-3.3-70b-versatile
+  name: huggingface
+  model: Qwen/Qwen3-Next-80B-A3B-Thinking
+  inference_provider: auto
   max_tokens: 1024
+  # api_key_env: HF_TOKEN
+  # base_url:
 
 workflow:
   max_retries: 2
   retry_delay_ms: 500
 ```
 
-For the default config, set `GROQ_API_KEY` in your environment or in a local
-`.env` file:
+For `provider.name: huggingface`, anchora uses smolagents'
+`InferenceClientModel` and authenticates with `HF_TOKEN`. Set
+`provider.inference_provider` to `auto`, `hf-inference`, or another Hugging Face
+Inference Provider supported by your chosen model. Set `provider.base_url` only
+when targeting a dedicated Inference Endpoint.
+
+If `provider.model` does not include a LiteLLM provider prefix, anchora prefixes
+it with `provider.name` for non-Hugging Face providers.
+
+Known provider environment defaults:
+
+- `groq` -> `GROQ_API_KEY`
+- `huggingface` -> `HF_TOKEN`
+- `openai` -> `OPENAI_API_KEY`
+
+For a custom provider, set `provider.api_key_env`.
+
+## Install
 
 ```sh
-GROQ_API_KEY=your_api_key_here
+uv sync
+```
+
+Or install with pip:
+
+```sh
+python -m venv .venv
+. .venv/bin/activate
+pip install -e .
 ```
 
 ## Run
 
+Set `HF_TOKEN` in your environment or in a local `.env` file:
+
 ```sh
-go run .
+HF_TOKEN=your_huggingface_token_here
+```
+
+Run the workflow:
+
+```sh
+uv run anchora
 ```
 
 The program prints state transitions and step outputs to the logs.
+
+## Test
+
+```sh
+uv run --extra dev pytest
+```
