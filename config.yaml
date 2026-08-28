@@ -5,6 +5,15 @@ workflow:
   max_retries: 2
   retry_delay_ms: 500
 
-# Named Eino agents are optional. Set OPENAI_API_KEY (or each agent's
-# api_key_env) before starting the server.
+# Set enabled to true to expose the asynchronous job API. DATABASE_URL and
+# REDIS_URL must then point to PostgreSQL and Redis, respectively.
+async:
+  enabled: false
+  database_url_env: DATABASE_URL
+  redis_url_env: REDIS_URL
+  queue_name: anchora:jobs
+  workers: 2
+
+# Named Hugging Face agents are optional. Set HF_TOKEN (or each agent's
+# token_env) before starting the server.
 agents: {}

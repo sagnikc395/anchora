@@ -8,9 +8,17 @@ import (
 )
 
 type Config struct {
-	Server   Server               `yaml:"server"`
-	Workflow Workflow             `yaml:"workflow"`
-	Agents   map[string]EinoAgent `yaml:"agents"`
+	Server   Server                      `yaml:"server"`
+	Workflow Workflow                    `yaml:"workflow"`
+	Async    Async                       `yaml:"async"`
+	Agents   map[string]HuggingFaceAgent `yaml:"agents"`
+}
+type Async struct {
+	Enabled        bool   `yaml:"enabled"`
+	DatabaseURLEnv string `yaml:"database_url_env"`
+	RedisURLEnv    string `yaml:"redis_url_env"`
+	QueueName      string `yaml:"queue_name"`
+	Workers        int    `yaml:"workers"`
 }
 type Server struct {
 	Address string `yaml:"address"`
@@ -19,14 +27,12 @@ type Workflow struct {
 	MaxRetries   int `yaml:"max_retries"`
 	RetryDelayMS int `yaml:"retry_delay_ms"`
 }
-type EinoAgent struct {
-	Model         string `yaml:"model"`
-	APIKeyEnv     string `yaml:"api_key_env"`
-	BaseURL       string `yaml:"base_url"`
-	Instruction   string `yaml:"instruction"`
-	MaxTokens     int    `yaml:"max_tokens"`
-	MaxIterations int    `yaml:"max_iterations"`
-	TimeoutMS     int    `yaml:"timeout_ms"`
+type HuggingFaceAgent struct {
+	ModelID     string `yaml:"model_id"`
+	TokenEnv    string `yaml:"token_env"`
+	Instruction string `yaml:"instruction"`
+	MaxTokens   int    `yaml:"max_tokens"`
+	TimeoutMS   int    `yaml:"timeout_ms"`
 }
 
 func Load(path string) (Config, error) {
@@ -44,15 +50,38 @@ func Load(path string) (Config, error) {
 	if cfg.Workflow.MaxRetries < 0 || cfg.Workflow.RetryDelayMS < 0 {
 		return Config{}, fmt.Errorf("workflow retry values must be non-negative")
 	}
+	if cfg.Async.Workers < 0 {
+		return Config{}, fmt.Errorf("async workers must be non-negative")
+	}
 	for name, agent := range cfg.Agents {
-		if name == "" || agent.Model == "" {
-			return Config{}, fmt.Errorf("agents must have a name and model")
+		if name == "" || agent.ModelID == "" {
+			return Config{}, fmt.Errorf("agents must have a name and model_id")
 		}
-		if agent.MaxTokens < 0 || agent.MaxIterations < 0 || agent.TimeoutMS < 0 {
+		if agent.MaxTokens < 0 || agent.TimeoutMS < 0 {
 			return Config{}, fmt.Errorf("agent %q values must be non-negative", name)
 		}
 	}
 	return cfg, nil
 }
+func (a Async) DatabaseURL() string {
+	if a.DatabaseURLEnv == "" {
+		a.DatabaseURLEnv = "DATABASE_URL"
+	}
+	return os.Getenv(a.DatabaseURLEnv)
+}
+func (a Async) RedisURL() string {
+	if a.RedisURLEnv == "" {
+		a.RedisURLEnv = "REDIS_URL"
+	}
+	return os.Getenv(a.RedisURLEnv)
+}
+func (a Async) WorkerCount() int {
+	if a.Workers == 0 {
+		return 1
+	}
+	return a.Workers
+}
 func (w Workflow) RetryDelay() time.Duration { return time.Duration(w.RetryDelayMS) * time.Millisecond }
-func (a EinoAgent) Timeout() time.Duration   { return time.Duration(a.TimeoutMS) * time.Millisecond }
+func (a HuggingFaceAgent) Timeout() time.Duration {
+	return time.Duration(a.TimeoutMS) * time.Millisecond
+}
