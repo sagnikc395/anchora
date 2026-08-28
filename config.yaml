@@ -1,11 +1,10 @@
-provider:
-  name: huggingface                       # huggingface | groq | openai
-  model: Qwen/Qwen3-Next-80B-A3B-Thinking
-  inference_provider: auto                # auto | hf-inference | other HF Inference Providers
-  max_tokens: 1024
-  # api_key_env: HF_TOKEN                 # optional override for custom providers
-  # base_url:                             # optional dedicated Inference Endpoint URL
+server:
+  address: ":8080"
 
 workflow:
   max_retries: 2
   retry_delay_ms: 500
+
+# Named Eino agents are optional. Set OPENAI_API_KEY (or each agent's
+# api_key_env) before starting the server.
+agents: {}
