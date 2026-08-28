@@ -28,7 +28,7 @@ flowchart LR
 
 ## Run locally
 
-Prerequisites: Go 1.24+, a Hugging Face `HF_TOKEN`, Docker, PostgreSQL, and Redis.
+Prerequisites: Go 1.25+, a Hugging Face `HF_TOKEN`, Docker, PostgreSQL, and Redis.
 
 ```sh
 docker compose up -d
@@ -37,6 +37,33 @@ export DATABASE_URL='postgres://anchora:anchora@localhost:5432/anchora?sslmode=d
 export REDIS_URL='redis://localhost:6379/0'
 go run ./cmd/anchora -config config.yaml
 ```
+
+## Development commands
+
+The repository includes a [Taskfile](Taskfile.yml) for the usual local commands. Install [Task](https://taskfile.dev/installation/) and run:
+
+```sh
+task                 # run all tests
+task run             # start Anchora with config.yaml
+task run CONFIG=dev.yaml
+task fmt             # format Go sources
+task check           # verify formatting and run tests
+task services-up     # start PostgreSQL and Redis
+task services-down   # stop PostgreSQL and Redis
+task services-logs   # follow dependency logs
+```
+
+`task run` starts the checked-in synchronous configuration. To use the durable job API, set `async.enabled: true`, configure an agent, export `HF_TOKEN`, `DATABASE_URL`, and `REDIS_URL`, then run `task services-up` before starting the service.
+
+## Project stages
+
+Anchora has progressed through these implemented stages:
+
+1. **Workflow foundation** — validates dependency graphs, runs ready DAG steps concurrently, renders upstream-output references, and applies context-aware linear retries.
+2. **Service and model integration** — exposes the synchronous HTTP workflow endpoint and runs named Hugging Face Inference Provider agents.
+3. **Durable asynchronous execution** — persists jobs, steps, results, and replayable events in PostgreSQL; queues work in Redis; and provides job-status and SSE endpoints. This is the current stage.
+
+The asynchronous endpoints are available only when `async.enabled` is true. The checked-in `config.yaml` intentionally keeps them off and has no configured agents, so it can start safely but cannot execute a workflow until an agent is added.
 
 Enable async mode and configure agents in `config.yaml`:
 

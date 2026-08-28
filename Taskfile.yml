@@ -1,0 +1,43 @@
+version: '3'
+
+tasks:
+  default:
+    desc: Run the test suite
+    cmds:
+      - task: test
+
+  run:
+    desc: Start Anchora with config.yaml (set CONFIG=path/to/config.yaml to override)
+    cmds:
+      - go run ./cmd/anchora -config {{.CONFIG | default "config.yaml"}}
+
+  test:
+    desc: Run all Go tests
+    cmds:
+      - go test ./...
+
+  fmt:
+    desc: Format all Go source files
+    cmds:
+      - gofmt -w $(rg --files -g '*.go')
+
+  check:
+    desc: Format-check and test the project
+    cmds:
+      - test -z "$(gofmt -l $(rg --files -g '*.go'))"
+      - task: test
+
+  services-up:
+    desc: Start the PostgreSQL and Redis dependencies for async jobs
+    cmds:
+      - docker compose up -d
+
+  services-down:
+    desc: Stop the PostgreSQL and Redis dependencies
+    cmds:
+      - docker compose down
+
+  services-logs:
+    desc: Follow logs for the PostgreSQL and Redis dependencies
+    cmds:
+      - docker compose logs -f
