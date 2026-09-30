@@ -1,4 +1,4 @@
-# Anchora
+# anchora
 
 [![CI](https://github.com/sagnikc395/anchora/actions/workflows/ci.yml/badge.svg)](https://github.com/sagnikc395/anchora/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/go-1.25-00ADD8.svg)](go.mod)
