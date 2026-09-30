@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagnikc395/anchora"
+	"github.com/sagnikc395/anchora/internal/workflow"
 )
 
 // These tests exercise the Lua scripts and SQL against real servers. They are
@@ -61,9 +61,9 @@ func seedJob(t *testing.T, store *Store) *Job {
 		t.Fatal(err)
 	}
 	job := &Job{
-		ID: id, Status: anchora.Pending, CreatedAt: time.Now().UTC(),
+		ID: id, Status: workflow.Pending, CreatedAt: time.Now().UTC(),
 		Steps:   []Step{{ID: "one", Agent: "a", Prompt: "first"}},
-		Results: []anchora.StepResult{{ID: "one", Status: anchora.Pending}},
+		Results: []workflow.StepResult{{ID: "one", Status: workflow.Pending}},
 	}
 	if err := store.Create(context.Background(), job); err != nil {
 		t.Fatalf("create job: %v", err)
@@ -207,14 +207,14 @@ func TestIntegrationStoreLeaseExpiryAllowsTakeover(t *testing.T) {
 	if err != nil || held {
 		t.Fatalf("evicted worker extend = %t, %v; want false", held, err)
 	}
-	if held, err = store.FinishJob(ctx, job.ID, "worker-1", anchora.Succeeded, ""); err != nil || held {
+	if held, err = store.FinishJob(ctx, job.ID, "worker-1", workflow.Succeeded, ""); err != nil || held {
 		t.Fatalf("evicted worker finish = %t, %v; want false", held, err)
 	}
 	fetched, err := store.Get(ctx, job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fetched.Status == anchora.Succeeded {
+	if fetched.Status == workflow.Succeeded {
 		t.Fatal("an evicted worker overwrote the new owner's job state")
 	}
 }
@@ -227,7 +227,7 @@ func TestIntegrationStoreTerminalJobsAreNotReclaimable(t *testing.T) {
 	if _, _, err := store.ClaimJob(ctx, job.ID, "worker-1", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if held, err := store.FinishJob(ctx, job.ID, "worker-1", anchora.Succeeded, ""); err != nil || !held {
+	if held, err := store.FinishJob(ctx, job.ID, "worker-1", workflow.Succeeded, ""); err != nil || !held {
 		t.Fatalf("finish = %t, %v; want true", held, err)
 	}
 	if _, claimed, err := store.ClaimJob(ctx, job.ID, "worker-2", time.Minute); err != nil || claimed {
@@ -263,7 +263,7 @@ func TestIntegrationStoreReclaimsExpiredJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fetched.Status != anchora.Pending || fetched.Owner != "" {
+	if fetched.Status != workflow.Pending || fetched.Owner != "" {
 		t.Fatalf("reclaimed job = %q owned by %q; want pending and unowned", fetched.Status, fetched.Owner)
 	}
 }
@@ -284,7 +284,7 @@ func TestIntegrationStoreFencesStepWrites(t *testing.T) {
 		t.Fatalf("non-owner step claim = %t, %v; want false", claimed, err)
 	}
 	// A write from a worker that does not hold the lease must not land.
-	if err := store.UpdateStep(ctx, job.ID, "worker-2", anchora.StepResult{ID: "one", Status: anchora.Succeeded, Output: "stale"}); err != nil {
+	if err := store.UpdateStep(ctx, job.ID, "worker-2", workflow.StepResult{ID: "one", Status: workflow.Succeeded, Output: "stale"}); err != nil {
 		t.Fatal(err)
 	}
 	fetched, err := store.Get(ctx, job.ID)
@@ -295,7 +295,7 @@ func TestIntegrationStoreFencesStepWrites(t *testing.T) {
 		t.Fatal("an unfenced write from a superseded worker landed")
 	}
 	// The owner's write must land, and a succeeded step must then refuse a claim.
-	if err := store.UpdateStep(ctx, job.ID, "worker-1", anchora.StepResult{ID: "one", Status: anchora.Succeeded, Output: "real"}); err != nil {
+	if err := store.UpdateStep(ctx, job.ID, "worker-1", workflow.StepResult{ID: "one", Status: workflow.Succeeded, Output: "real"}); err != nil {
 		t.Fatal(err)
 	}
 	if claimed, err = store.ClaimStep(ctx, job.ID, "one", "worker-1"); err != nil || claimed {
@@ -367,7 +367,7 @@ func TestIntegrationCrashRecoveryResumesJob(t *testing.T) {
 	if _, claimed, err := store.ClaimJob(ctx, job.ID, "dead-worker", 100*time.Millisecond); err != nil || !claimed {
 		t.Fatalf("setup claim: %t %v", claimed, err)
 	}
-	if err := store.UpdateStep(ctx, job.ID, "dead-worker", anchora.StepResult{ID: "one", Status: anchora.Succeeded, Output: "out:first"}); err != nil {
+	if err := store.UpdateStep(ctx, job.ID, "dead-worker", workflow.StepResult{ID: "one", Status: workflow.Succeeded, Output: "out:first"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := queue.Claim(ctx, "dead-worker", 100*time.Millisecond); err != nil {
@@ -393,7 +393,7 @@ func TestIntegrationCrashRecoveryResumesJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fetched.Status != anchora.Succeeded {
+	if fetched.Status != workflow.Succeeded {
 		t.Fatalf("recovered job status = %q (%s); want succeeded", fetched.Status, fetched.Error)
 	}
 }

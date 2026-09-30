@@ -1,4 +1,8 @@
-// Package einoagent adapts an Eino chat model to anchora.Agent.
+// Package einoagent adapts an Eino chat model to workflow.Agent.
+//
+// Hugging Face's Inference Providers router is the default endpoint, but the
+// adapter speaks plain OpenAI chat completions, so BaseURL points it at any
+// compatible provider.
 package einoagent
 
 import (
@@ -14,16 +18,32 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-const defaultBaseURL = "https://router.huggingface.co/v1"
+const (
+	defaultBaseURL  = "https://router.huggingface.co/v1"
+	defaultTokenEnv = "HF_TOKEN"
+)
 
-// Config configures an OpenAI-compatible Eino chat model. Hugging Face's
-// router is the default endpoint, but BaseURL makes the adapter usable with
-// any compatible provider.
+// Config configures an OpenAI-compatible Eino chat model.
 type Config struct {
-	Name, ModelID, TokenEnv, Instruction, BaseURL string
-	MaxTokens                                     int
-	Timeout                                       time.Duration
-	HTTPClient                                    *http.Client
+	// Name identifies the agent in configuration and error messages.
+	Name string
+	// ModelID is the provider's model name. It is required.
+	ModelID string
+	// BaseURL is the OpenAI-compatible endpoint. Zero uses Hugging Face's
+	// Inference Providers router.
+	BaseURL string
+	// TokenEnv names the environment variable holding the bearer token. Zero
+	// uses HF_TOKEN.
+	TokenEnv string
+	// Instruction is sent as a system message ahead of every prompt.
+	Instruction string
+	// MaxTokens caps the response length. Zero omits the field from the
+	// request, leaving the provider's own default in place.
+	MaxTokens int
+	// Timeout bounds a single generation. Zero leaves the client unbounded.
+	Timeout time.Duration
+	// HTTPClient replaces the default transport. It is primarily a test seam.
+	HTTPClient *http.Client
 }
 
 // Agent is an Anchora agent backed by Eino's OpenAI-compatible ChatModel.
@@ -32,13 +52,15 @@ type Agent struct {
 	instruction string
 }
 
-// New creates an Eino chat model for an OpenAI-compatible endpoint.
+// New creates an Eino chat model for an OpenAI-compatible endpoint. It fails if
+// the configured token variable is unset, so a misconfigured agent is caught at
+// startup rather than on the first request.
 func New(ctx context.Context, config Config) (*Agent, error) {
 	if config.Name == "" || config.ModelID == "" {
 		return nil, errors.New("Eino agent requires a name and model ID")
 	}
 	if config.TokenEnv == "" {
-		config.TokenEnv = "HF_TOKEN"
+		config.TokenEnv = defaultTokenEnv
 	}
 	token := os.Getenv(config.TokenEnv)
 	if token == "" {
@@ -65,7 +87,9 @@ func New(ctx context.Context, config Config) (*Agent, error) {
 	return &Agent{model: model, instruction: config.Instruction}, nil
 }
 
-// Run generates one response using Eino's standard chat-model interface.
+// Run generates one response using Eino's standard chat-model interface. An
+// empty completion is an error: a workflow step that produced no text has
+// nothing to pass downstream, and retrying it is usually the right move.
 func (a *Agent) Run(ctx context.Context, prompt string) (string, error) {
 	if a == nil || a.model == nil {
 		return "", errors.New("Eino agent is not initialized")

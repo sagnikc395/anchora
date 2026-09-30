@@ -2,14 +2,19 @@ version: '3'
 
 tasks:
   default:
-    desc: Run the test suite
+    desc: Format-check, vet, and test the project
     cmds:
-      - task: test
+      - task: check
 
   run:
     desc: Start Anchora with config.yaml (set CONFIG=path/to/config.yaml to override)
     cmds:
       - go run ./cmd/anchora -config {{.CONFIG | default "config.yaml"}}
+
+  build:
+    desc: Build the anchora binary into ./bin
+    cmds:
+      - go build -o bin/anchora ./cmd/anchora
 
   test:
     desc: Run all Go tests (backend integration tests skip without services)
@@ -23,23 +28,57 @@ tasks:
       ANCHORA_TEST_REDIS_URL: redis://localhost:6379/1
     cmds:
       - task: services-up
-      - go test -race -count=1 -run Integration ./jobs/
+      - go test -race -count=1 -run Integration ./internal/jobs/
+
+  cover:
+    desc: Write a coverage profile and open the HTML report
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -html=coverage.out -o coverage.html
+      - go tool cover -func=coverage.out | tail -1
 
   fmt:
     desc: Format all Go source files
     cmds:
-      - gofmt -w $(rg --files -g '*.go')
+      - gofmt -w .
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
 
   check:
-    desc: Format-check and test the project
+    desc: Format-check, vet, and test the project
     cmds:
-      - test -z "$(gofmt -l $(rg --files -g '*.go'))"
+      - cmd: test -z "$(gofmt -l .)" || { echo 'not gofmt-clean:'; gofmt -l .; exit 1; }
+        silent: true
+      - task: vet
       - task: test
+
+  tidy:
+    desc: Tidy go.mod and go.sum
+    cmds:
+      - go mod tidy
+
+  image:
+    desc: Build the anchora container image as anchora:local
+    cmds:
+      - docker build -t anchora:local .
+
+  app-up:
+    desc: Start Anchora with PostgreSQL and Redis via docker compose
+    cmds:
+      - docker compose --profile app up -d --build --wait
+
+  app-down:
+    desc: Stop Anchora and its dependencies
+    cmds:
+      - docker compose --profile app down
 
   services-up:
     desc: Start the PostgreSQL and Redis dependencies for async jobs
     cmds:
-      - docker compose up -d
+      - docker compose up -d --wait
 
   services-down:
     desc: Stop the PostgreSQL and Redis dependencies

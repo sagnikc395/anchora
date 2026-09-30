@@ -29,7 +29,16 @@ type Queue struct {
 	waitTimeout                   time.Duration
 }
 
-const notifyBacklog = 255
+const (
+	// notifyBacklog caps the wakeup-hint list. Hints are advisory — the claim
+	// script is the source of truth — so an oversized backlog is only waste.
+	notifyBacklog = 255
+	// defaultQueueName is the key prefix used when none is configured.
+	defaultQueueName = "anchora:jobs"
+	// claimWait bounds how long an idle worker parks on the notify list before
+	// returning, so it can re-check its context between attempts.
+	claimWait = time.Second
+)
 
 // claimScript moves one ready job into the lease set under a single owner. It
 // returns false (redis.Nil) when nothing is ready.
@@ -90,13 +99,15 @@ end
 return expired
 `)
 
+// NewQueue connects to Redis and verifies the connection. An empty name uses
+// the default key prefix. The caller owns the returned queue and must Close it.
 func NewQueue(ctx context.Context, redisURL, name string) (*Queue, error) {
 	options, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse Redis URL: %w", err)
 	}
 	if name == "" {
-		name = "anchora:jobs"
+		name = defaultQueueName
 	}
 	client := redis.NewClient(options)
 	if err := client.Ping(ctx).Err(); err != nil {
@@ -109,10 +120,11 @@ func NewQueue(ctx context.Context, redisURL, name string) (*Queue, error) {
 		leases:      name + ":leases",
 		owners:      name + ":owners",
 		notify:      name + ":notify",
-		waitTimeout: time.Second,
+		waitTimeout: claimWait,
 	}, nil
 }
 
+// Close releases the Redis client.
 func (q *Queue) Close() error { return q.client.Close() }
 
 // Push enqueues a job ID for execution.
@@ -166,7 +178,7 @@ func (q *Queue) Requeue(ctx context.Context, id string) error {
 // many were recovered. Every worker may call it; the script is atomic.
 func (q *Queue) Reclaim(ctx context.Context, limit int) ([]string, error) {
 	if limit <= 0 {
-		limit = 100
+		limit = defaultReclaimBatch
 	}
 	now := time.Now().UnixMilli()
 	return reclaimScript.Run(ctx, q.client, []string{q.ready, q.leases, q.owners, q.notify}, now, limit, notifyBacklog).StringSlice()

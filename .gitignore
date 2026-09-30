@@ -1,12 +1,20 @@
+# Compiled binaries
+/anchora
+/bin/
+*.exe
+
+# Test and coverage output
+*.test
+coverage.out
+coverage.html
+
+# Local configuration and secrets
 .env
 !.env.example
+config.local.yaml
 
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-dist/
-build/
-*.egg-info/
+# Editor and OS cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp

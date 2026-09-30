@@ -1,0 +1,14 @@
+.git
+.github
+bin/
+*.test
+coverage.out
+coverage.html
+.env
+config.local.yaml
+Dockerfile
+.dockerignore
+docker-compose.yml
+README.md
+LICENSE
+Taskfile.yml

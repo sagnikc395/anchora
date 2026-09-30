@@ -1,5 +1,9 @@
 # Anchora
 
+[![CI](https://github.com/sagnikc395/anchora/actions/workflows/ci.yml/badge.svg)](https://github.com/sagnikc395/anchora/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/go-1.25-00ADD8.svg)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Anchora runs small workflows made of dependent agent calls. You describe the
 steps, Anchora checks that their dependencies form a valid DAG, runs steps that
 are ready at the same time, and makes successful outputs available to later
@@ -38,9 +42,11 @@ Prompts can include an earlier step's output using
 
 Before execution, Anchora rejects empty steps, missing fields, duplicate step
 IDs or dependencies, self-dependencies, unknown dependencies, cycles, and
-negative retry settings. Steps in the same ready wave run concurrently. A
-failed dependency causes downstream steps to be skipped. A failed workflow
-returns the results collected up to that point as well as the failing step.
+negative retry settings. Steps in the same ready wave run concurrently, and
+every prompt in a wave is rendered before the wave starts. A failed step skips
+its whole downstream chain, not just its immediate dependents. A failed
+workflow returns the results collected up to that point as well as the failing
+step.
 
 Retries are configured globally. `max_retries` counts attempts after the first
 call, and the delay is linear: retry number × `retry_delay_ms`. `Retrying` is an
@@ -81,14 +87,14 @@ flowchart LR
         Events["GET /v1/jobs/{id}/events"]
     end
 
-    Engine[Workflow engine\nvalidate DAG, render prompts, run ready steps]
-    HF[Eino chat model adapter\nOpenAI-compatible provider]
-    DB[(PostgreSQL\njobs, steps, events, workers\nowner + lease per job)]
-    Ready[(Redis ready list)]
-    Leases[(Redis lease set\njob to deadline + owner)]
-    Worker[Worker\nclaim, heartbeat, run]
-    Reaper[Reaper\nsweep expired leases]
-    HFRouter[Provider endpoint\nrouter.huggingface.co by default]
+    Engine["Workflow engine<br/>validate DAG, render prompts, run ready steps"]
+    HF["Eino chat model adapter<br/>OpenAI-compatible provider"]
+    DB[("PostgreSQL<br/>jobs, steps, events, workers<br/>owner + lease per job")]
+    Ready[("Redis ready list")]
+    Leases[("Redis lease set<br/>job to deadline + owner")]
+    Worker["Worker<br/>claim, heartbeat, run"]
+    Reaper["Reaper<br/>sweep expired leases"]
+    HFRouter["Provider endpoint<br/>router.huggingface.co by default"]
 
     Client --> Sync
     Sync --> Engine
@@ -117,9 +123,10 @@ lease period so the cheaper sweep goes first.
 
 ## Running it
 
-Requirements: Go 1.25 or newer. Docker is only needed for the optional
-PostgreSQL and Redis services. Real requests also need an API token for the
-provider you point an agent at; Hugging Face's router is the default.
+Requirements: Go 1.25 or newer, or just Docker if you would rather not build
+locally. Docker is otherwise only needed for the optional PostgreSQL and Redis
+services. Real requests also need an API token for the provider you point an
+agent at; Hugging Face's router is the default.
 
 The checked-in `config.yaml` starts the synchronous API and has no agents
 configured. Add at least one named agent before sending a workflow:
@@ -138,7 +145,8 @@ agents:
 `base_url` is optional and defaults to Hugging Face's router. Point it at any
 other OpenAI-compatible endpoint, with `token_env` naming that provider's key.
 
-Then set the token and start the server:
+Then set the token and start the server. `.env.example` lists every variable
+Anchora reads:
 
 ```sh
 export HF_TOKEN=hf_replace_me
@@ -151,8 +159,10 @@ like this:
 ```sh
 curl -X POST http://localhost:8080/v1/workflows/run \
   -H 'Content-Type: application/json' \
-  -d @workflow.json
+  -d @examples/workflow.json
 ```
+
+`examples/workflow.json` holds the two-step workflow shown above.
 
 ### Durable jobs
 
@@ -160,7 +170,7 @@ Set `async.enabled: true` and provide PostgreSQL and Redis URLs through the
 configured environment variables. The included services can be started with:
 
 ```sh
-docker compose up -d
+docker compose up -d --wait
 export DATABASE_URL='postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable'
 export REDIS_URL='redis://localhost:6379/0'
 export HF_TOKEN=hf_replace_me
@@ -188,7 +198,7 @@ Submit and inspect a job:
 ```sh
 curl -X POST http://localhost:8080/v1/jobs \
   -H 'Content-Type: application/json' \
-  -d @workflow.json
+  -d @examples/workflow.json
 
 curl http://localhost:8080/v1/jobs/<job-id>
 curl -N -H 'Last-Event-ID: 0' \
@@ -224,6 +234,31 @@ curl http://localhost:8080/v1/cluster
   ]
 }
 ```
+
+### In containers
+
+The `Dockerfile` builds a static binary and copies it onto a distroless base, so
+the image carries the binary, CA certificates, and nothing else, and runs as a
+non-root user:
+
+```sh
+docker build -t anchora:local .
+docker run --rm -p 8080:8080 -e HF_TOKEN=hf_replace_me \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" anchora:local
+```
+
+`config.yaml` is mounted rather than baked in, so a configuration change does
+not need a rebuild. To bring the whole stack up instead, use the compose `app`
+profile, which starts Anchora with PostgreSQL and Redis and points it at both:
+
+```sh
+task app-up     # docker compose --profile app up -d --build --wait
+```
+
+Set `async.enabled: true` in `config.yaml` first if you want the job API; the
+service picks up `HF_TOKEN` from a local `.env` if one exists. Without the
+profile, `docker compose up` still starts only PostgreSQL and Redis, which is
+what the integration tests want.
 
 ## HTTP API
 
@@ -304,26 +339,40 @@ The distributed settings tune recovery:
 | `reclaim_batch` | `100` | Jobs recovered per sweep. |
 | `reaper` | `true` | Whether this node runs the sweep. Safe to leave on everywhere; the sweeps are atomic. |
 
+Settings are validated at startup: a `heartbeat_ms` at or past `lease_ms` is
+rejected outright, because a lease that expires before it is ever renewed would
+have every job reclaimed mid-run.
+
 ## Development
 
 ```sh
 task run           # go run ./cmd/anchora -config config.yaml (override with CONFIG=)
+task build         # build ./bin/anchora
 task test          # go test -race ./...
-task check         # format check plus tests
+task check         # gofmt check, go vet, and tests — what CI runs
+task cover         # coverage profile plus an HTML report
 task fmt
-task services-up   # docker compose up -d (PostgreSQL and Redis)
+task vet
+task tidy
+task image         # docker build -t anchora:local .
+task app-up        # docker compose --profile app up -d --build --wait
+task app-down
+task services-up   # docker compose up -d --wait (PostgreSQL and Redis only)
 task services-down
 task services-logs
 ```
 
-Unit tests cover the workflow engine (including resume), the synchronous
-router, the Eino model adapter, configuration, and the worker lifecycle
-(claim, resume, duplicate delivery, lease loss, shutdown requeue,
-dead-lettering, and reaping) against in-memory fakes, so they need no services.
+Unit tests cover the workflow engine (DAG validation, concurrent waves,
+retries, skip cascades, and resume), every HTTP route including the SSE stream,
+the Eino model adapter, configuration, and the worker lifecycle (claim, resume,
+duplicate delivery, lease loss, shutdown requeue, dead-lettering, and reaping).
+They run against in-memory fakes, so they need no services.
 
-The Lua scripts and SQL are covered separately by tests that need real servers.
-They skip unless both URLs are set; `task test-integration` starts the compose
-services and sets them for you:
+The Lua scripts and SQL in `internal/jobs/store.go` and `internal/jobs/queue.go`
+are the one part
+the fakes cannot stand in for, so they are covered separately by tests that
+need real servers. Those skip unless both URLs are set; `task test-integration`
+starts the compose services and sets them for you:
 
 ```sh
 task test-integration
@@ -331,18 +380,32 @@ task test-integration
 # or, against your own instances (the Redis database given is written to):
 ANCHORA_TEST_DATABASE_URL='postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable' \
 ANCHORA_TEST_REDIS_URL='redis://localhost:6379/1' \
-  go test -race -count=1 -run Integration ./jobs/
+  go test -race -count=1 -run Integration ./internal/jobs/
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Repository map
 
 ```text
-workflow.go                DAG validation and execution
-httpapi/router.go          HTTP routes and SSE polling
-jobs/jobs.go               submission, worker lifecycle, reaper
-jobs/store.go              PostgreSQL schema, leases, worker registry
-jobs/queue.go              Redis queue: atomic claim, lease, reclaim
-einoagent/agent.go         Eino OpenAI-compatible model adapter (Hugging Face by default)
-config/config.go           YAML and environment configuration
-cmd/anchora/main.go        executable entrypoint
+cmd/anchora/main.go             executable entrypoint
+internal/workflow/workflow.go   DAG validation and execution
+internal/httpapi/router.go      HTTP routes and SSE polling
+internal/jobs/jobs.go           submission, worker lifecycle, reaper
+internal/jobs/store.go          PostgreSQL schema, leases, worker registry
+internal/jobs/queue.go          Redis queue: atomic claim, lease, reclaim
+internal/einoagent/agent.go     Eino OpenAI-compatible model adapter (Hugging Face by default)
+internal/config/config.go       YAML and environment configuration
+config.yaml                     the configuration the server starts with
+Dockerfile                      static build on distroless, non-root
+docker-compose.yml              PostgreSQL, Redis, and the app under the `app` profile
+examples/workflow.json          a two-step request body for the curl examples
+.github/workflows/ci.yml        build, vet, gofmt, tests, and the integration suite
 ```
+
+Anchora ships as a binary, not as a library: everything but `cmd/anchora` lives
+under `internal/`, so the HTTP API and `config.yaml` are the whole compatibility
+surface and the packages behind them stay free to change.
+

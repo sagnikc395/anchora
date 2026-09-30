@@ -1,0 +1,15 @@
+{
+  "steps": [
+    {
+      "id": "research",
+      "agent": "research",
+      "prompt": "Explain Go's select statement in a few sentences."
+    },
+    {
+      "id": "summary",
+      "agent": "research",
+      "depends_on": ["research"],
+      "prompt": "Summarize this in one sentence:\n{{steps.research.output}}"
+    }
+  ]
+}

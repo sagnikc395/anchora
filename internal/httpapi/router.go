@@ -1,37 +1,61 @@
 // Package httpapi exposes Anchora workflows through a Chi router.
+//
+// Two shapes of execution share one request body: /v1/workflows/run executes a
+// workflow inside the request, and /v1/jobs hands it to the durable backend and
+// returns immediately. The job routes are registered only when a backend is
+// configured.
 package httpapi
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/sagnikc395/anchora"
-	"github.com/sagnikc395/anchora/jobs"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/sagnikc395/anchora/internal/jobs"
+	"github.com/sagnikc395/anchora/internal/workflow"
 )
 
-type AgentResolver interface {
-	Resolve(string) (anchora.Agent, bool)
-}
-type AgentRegistry map[string]anchora.Agent
+// maxRequestBytes bounds a workflow submission so an oversized body is
+// rejected before it is buffered.
+const maxRequestBytes = 1 << 20
 
-func (r AgentRegistry) Resolve(name string) (anchora.Agent, bool) {
+// pollInterval is how often the SSE handler re-reads a job's event log.
+const pollInterval = 500 * time.Millisecond
+
+// AgentResolver maps a step's agent name to a runnable agent.
+type AgentResolver interface {
+	Resolve(string) (workflow.Agent, bool)
+}
+
+// AgentRegistry is an AgentResolver backed by a map of named agents.
+type AgentRegistry map[string]workflow.Agent
+
+// Resolve looks up an agent by the name used in a step.
+func (r AgentRegistry) Resolve(name string) (workflow.Agent, bool) {
 	agent, ok := r[name]
 	return agent, ok
 }
 
+// Options configures the retry behaviour applied to every workflow the router
+// runs.
 type Options struct {
 	MaxRetries int
 	RetryDelay time.Duration
 }
 
+// NewRouter returns a router serving only the synchronous workflow API.
 func NewRouter(agents AgentResolver, options Options) http.Handler {
 	return NewRouterWithJobs(agents, options, nil)
 }
+
+// NewRouterWithJobs returns a router that also serves the durable job API. A
+// nil service omits the job routes entirely.
 func NewRouterWithJobs(agents AgentResolver, options Options, service *jobs.Service) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.Recoverer)
@@ -48,47 +72,63 @@ func NewRouterWithJobs(agents AgentResolver, options Options, service *jobs.Serv
 	return r
 }
 
+// runRequest is the request body shared by both execution endpoints.
 type runRequest struct {
 	Steps []stepRequest `json:"steps"`
 }
+
 type stepRequest struct {
 	ID        string   `json:"id"`
 	Agent     string   `json:"agent"`
 	Prompt    string   `json:"prompt"`
 	DependsOn []string `json:"depends_on,omitempty"`
 }
+
 type runResponse struct {
-	Steps []anchora.StepResult `json:"steps"`
+	Steps []workflow.StepResult `json:"steps"`
 }
 
+// decodeRunRequest reads a size-limited workflow body, rejecting unknown fields
+// so a typo in a step key is reported rather than silently dropped.
+func decodeRunRequest(w http.ResponseWriter, r *http.Request) (runRequest, bool) {
+	defer r.Body.Close()
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+	decoder.DisallowUnknownFields()
+	var request runRequest
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON request")
+		return runRequest{}, false
+	}
+	return request, true
+}
+
+// runHandler executes a workflow inside the request. A step failure is a 502:
+// the request itself was valid, but an upstream agent did not deliver.
 func runHandler(agents AgentResolver, options Options) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-		decoder.DisallowUnknownFields()
-		var request runRequest
-		if err := decoder.Decode(&request); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON request")
+		request, ok := decodeRunRequest(w, r)
+		if !ok {
 			return
 		}
-		steps := make([]anchora.Step, 0, len(request.Steps))
+		steps := make([]workflow.Step, 0, len(request.Steps))
 		for _, input := range request.Steps {
 			agent, ok := agents.Resolve(input.Agent)
 			if !ok {
 				writeError(w, http.StatusBadRequest, "unknown agent: "+input.Agent)
 				return
 			}
-			steps = append(steps, anchora.Step{ID: input.ID, Agent: agent, Prompt: input.Prompt, DependsOn: input.DependsOn})
+			steps = append(steps, workflow.Step{ID: input.ID, Agent: agent, Prompt: input.Prompt, DependsOn: input.DependsOn})
 		}
-		workflow, err := anchora.NewWorkflow(steps, anchora.Options{MaxRetries: options.MaxRetries, RetryDelay: options.RetryDelay})
+		wf, err := workflow.NewWorkflow(steps, workflow.Options{MaxRetries: options.MaxRetries, RetryDelay: options.RetryDelay})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		results, err := workflow.Run(r.Context())
+		results, err := wf.Run(r.Context())
 		if err != nil {
-			var workflowErr *anchora.WorkflowError
+			var workflowErr *workflow.WorkflowError
 			if errors.As(err, &workflowErr) {
+				// The partial results are more useful than the error alone.
 				writeJSON(w, http.StatusBadGateway, runResponse{Steps: results})
 				return
 			}
@@ -98,14 +138,12 @@ func runHandler(agents AgentResolver, options Options) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, runResponse{Steps: results})
 	}
 }
+
+// submitJobHandler records a workflow for asynchronous execution.
 func submitJobHandler(service *jobs.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-		decoder.DisallowUnknownFields()
-		var request runRequest
-		if err := decoder.Decode(&request); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON request")
+		request, ok := decodeRunRequest(w, r)
+		if !ok {
 			return
 		}
 		steps := make([]jobs.Step, len(request.Steps))
@@ -120,6 +158,7 @@ func submitJobHandler(service *jobs.Service) http.HandlerFunc {
 		writeJSON(w, http.StatusAccepted, job)
 	}
 }
+
 func getJobHandler(service *jobs.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		job, err := service.Get(r.Context(), chi.URLParam(r, "id"))
@@ -134,19 +173,21 @@ func getJobHandler(service *jobs.Service) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, job)
 	}
 }
+
+// eventsHandler streams a job's event log as Server-Sent Events by polling the
+// store, and closes the stream once the job reaches a terminal state.
 func eventsHandler(service *jobs.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := chi.URLParam(r, "id")
-		if job, err := service.Get(r.Context(), id); err != nil {
+		job, err := service.Get(r.Context(), id)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
-		} else if job == nil {
+		}
+		if job == nil {
 			writeError(w, http.StatusNotFound, "job not found")
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			writeError(w, http.StatusInternalServerError, "streaming unsupported")
@@ -164,7 +205,11 @@ func eventsHandler(service *jobs.Service) http.HandlerFunc {
 			}
 			after = parsed
 		}
-		ticker := time.NewTicker(500 * time.Millisecond)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
 			events, err := service.Events(r.Context(), id, after)
@@ -175,9 +220,7 @@ func eventsHandler(service *jobs.Service) http.HandlerFunc {
 			for _, event := range events {
 				_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.ID, event.Type, event.Data)
 				after = event.ID
-				if event.Type == "job.completed" || event.Type == "job.dead_lettered" {
-					terminal = true
-				}
+				terminal = terminal || jobs.IsTerminal(event.Type)
 			}
 			flusher.Flush()
 			if terminal {
@@ -208,6 +251,7 @@ func clusterHandler(service *jobs.Service) http.HandlerFunc {
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagnikc395/anchora"
+	"github.com/sagnikc395/anchora/internal/workflow"
 )
 
 // memStore is an in-memory JobStore with the same lease and fencing rules as
@@ -54,7 +54,7 @@ func (m *memStore) Get(_ context.Context, id string) (*Job, error) {
 		return nil, nil
 	}
 	clone := *entry.job
-	clone.Results = append([]anchora.StepResult(nil), entry.job.Results...)
+	clone.Results = append([]workflow.StepResult(nil), entry.job.Results...)
 	clone.Steps = append([]Step(nil), entry.job.Steps...)
 	clone.Owner, clone.Attempts = entry.owner, entry.attempts
 	return &clone, nil
@@ -67,7 +67,7 @@ func (m *memStore) ClaimJob(_ context.Context, id, owner string, lease time.Dura
 	if !ok {
 		return 0, false, nil
 	}
-	if entry.job.Status == anchora.Succeeded || entry.job.Status == anchora.Failed {
+	if entry.job.Status == workflow.Succeeded || entry.job.Status == workflow.Failed {
 		return 0, false, nil
 	}
 	if entry.owner != "" && entry.owner != owner && time.Now().Before(entry.leaseUntil) {
@@ -75,7 +75,7 @@ func (m *memStore) ClaimJob(_ context.Context, id, owner string, lease time.Dura
 	}
 	entry.attempts++
 	entry.owner, entry.leaseUntil = owner, time.Now().Add(lease)
-	entry.job.Status = anchora.Running
+	entry.job.Status = workflow.Running
 	return entry.attempts, true, nil
 }
 
@@ -97,7 +97,7 @@ func (m *memStore) ExtendLease(_ context.Context, id, owner string, lease time.D
 	return true, nil
 }
 
-func (m *memStore) FinishJob(_ context.Context, id, owner string, status anchora.Status, jobErr string) (bool, error) {
+func (m *memStore) FinishJob(_ context.Context, id, owner string, status workflow.Status, jobErr string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.jobs[id]
@@ -113,7 +113,7 @@ func (m *memStore) ReleaseJob(_ context.Context, id, owner string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if entry, ok := m.jobs[id]; ok && entry.owner == owner {
-		entry.owner, entry.job.Status = "", anchora.Pending
+		entry.owner, entry.job.Status = "", workflow.Pending
 	}
 	return nil
 }
@@ -123,11 +123,11 @@ func (m *memStore) ReclaimExpiredJobs(_ context.Context, grace time.Duration, li
 	defer m.mu.Unlock()
 	var ids []string
 	for id, entry := range m.jobs {
-		if entry.job.Status != anchora.Running || entry.leaseUntil.IsZero() {
+		if entry.job.Status != workflow.Running || entry.leaseUntil.IsZero() {
 			continue
 		}
 		if time.Now().After(entry.leaseUntil.Add(grace)) && len(ids) < limit {
-			entry.owner, entry.job.Status, entry.leaseUntil = "", anchora.Pending, time.Time{}
+			entry.owner, entry.job.Status, entry.leaseUntil = "", workflow.Pending, time.Time{}
 			ids = append(ids, id)
 		}
 	}
@@ -142,14 +142,14 @@ func (m *memStore) ClaimStep(_ context.Context, jobID, stepID, owner string) (bo
 		return false, nil
 	}
 	for _, result := range entry.job.Results {
-		if result.ID == stepID && result.Status == anchora.Succeeded {
+		if result.ID == stepID && result.Status == workflow.Succeeded {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-func (m *memStore) UpdateStep(_ context.Context, jobID, owner string, result anchora.StepResult) error {
+func (m *memStore) UpdateStep(_ context.Context, jobID, owner string, result workflow.StepResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	entry, ok := m.jobs[jobID]
@@ -194,7 +194,7 @@ func (m *memStore) eventTypes(jobID string) []string {
 	return types
 }
 
-func (m *memStore) status(jobID string) anchora.Status {
+func (m *memStore) status(jobID string) workflow.Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.jobs[jobID].job.Status
@@ -207,6 +207,7 @@ func (m *memStore) RegisterWorker(_ context.Context, w WorkerInfo) error {
 	return nil
 }
 func (m *memStore) HeartbeatWorker(context.Context, string, int64) error { return nil }
+
 func (m *memStore) UnregisterWorker(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -214,6 +215,7 @@ func (m *memStore) UnregisterWorker(_ context.Context, id string) error {
 	return nil
 }
 func (m *memStore) PruneWorkers(context.Context, time.Duration) (int64, error) { return 0, nil }
+
 func (m *memStore) Workers(context.Context, time.Duration) ([]WorkerInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -326,20 +328,20 @@ func (a *countingAgent) count(prompt string) int {
 	return a.calls[prompt]
 }
 
-type registry map[string]anchora.Agent
+type registry map[string]workflow.Agent
 
-func (r registry) Resolve(name string) (anchora.Agent, bool) {
+func (r registry) Resolve(name string) (workflow.Agent, bool) {
 	agent, ok := r[name]
 	return agent, ok
 }
 
-func newService(t *testing.T, store *memStore, queue *memQueue, agent anchora.Agent) *Service {
+func newService(t *testing.T, store *memStore, queue *memQueue, agent workflow.Agent) *Service {
 	t.Helper()
 	return &Service{
 		Store:   store,
 		Queue:   queue,
 		Agents:  registry{"a": agent},
-		Options: anchora.Options{},
+		Options: workflow.Options{},
 		Config:  Config{Lease: 2 * time.Second, Heartbeat: 20 * time.Millisecond, MaxAttempts: 3},
 		Logf:    func(format string, args ...any) { t.Logf(format, args...) },
 	}
@@ -364,7 +366,7 @@ func TestProcessRunsAndAcksJob(t *testing.T) {
 
 	service.process(context.Background(), "worker-1", job.ID)
 
-	if got := store.status(job.ID); got != anchora.Succeeded {
+	if got := store.status(job.ID); got != workflow.Succeeded {
 		t.Fatalf("status = %q, want succeeded", got)
 	}
 	if acked := queue.snapshot(&queue.acked); len(acked) != 1 || acked[0] != job.ID {
@@ -386,7 +388,7 @@ func TestProcessResumesWithoutRerunningCompletedSteps(t *testing.T) {
 	})
 	// Simulate the first delivery having completed step "one" before dying.
 	store.mu.Lock()
-	store.jobs[job.ID].job.Results[0] = anchora.StepResult{ID: "one", Status: anchora.Succeeded, Output: "out:first"}
+	store.jobs[job.ID].job.Results[0] = workflow.StepResult{ID: "one", Status: workflow.Succeeded, Output: "out:first"}
 	store.mu.Unlock()
 
 	service.process(context.Background(), "worker-2", job.ID)
@@ -397,7 +399,7 @@ func TestProcessResumesWithoutRerunningCompletedSteps(t *testing.T) {
 	if got := agent.count("second"); got != 1 {
 		t.Fatalf("remaining step ran %d time(s), want 1", got)
 	}
-	if got := store.status(job.ID); got != anchora.Succeeded {
+	if got := store.status(job.ID); got != workflow.Succeeded {
 		t.Fatalf("status = %q, want succeeded", got)
 	}
 	if !contains(store.eventTypes(job.ID), "job.resumed") {
@@ -438,7 +440,7 @@ func TestProcessDeadLettersAfterMaxAttempts(t *testing.T) {
 
 	service.process(context.Background(), "worker-1", job.ID)
 
-	if got := store.status(job.ID); got != anchora.Failed {
+	if got := store.status(job.ID); got != workflow.Failed {
 		t.Fatalf("status = %q, want failed", got)
 	}
 	if got := agent.count("first"); got != 0 {
@@ -469,7 +471,7 @@ func TestProcessAbandonsJobWhenLeaseIsLost(t *testing.T) {
 		t.Fatal("process did not return after losing its lease")
 	}
 
-	if got := store.status(job.ID); got == anchora.Succeeded || got == anchora.Failed {
+	if got := store.status(job.ID); got == workflow.Succeeded || got == workflow.Failed {
 		t.Fatalf("status = %q, want a non-terminal state after losing the lease", got)
 	}
 	if acked := queue.snapshot(&queue.acked); len(acked) != 0 {
@@ -505,7 +507,7 @@ func TestProcessRequeuesOnShutdown(t *testing.T) {
 	if requeued := queue.snapshot(&queue.requeued); len(requeued) != 1 || requeued[0] != job.ID {
 		t.Fatalf("requeued = %v, want [%s]", requeued, job.ID)
 	}
-	if got := store.status(job.ID); got != anchora.Pending {
+	if got := store.status(job.ID); got != workflow.Pending {
 		t.Fatalf("status = %q, want pending so another worker retries", got)
 	}
 }
@@ -521,7 +523,7 @@ func TestProcessFailsJobWhenAStepFails(t *testing.T) {
 
 	service.process(context.Background(), "worker-1", job.ID)
 
-	if got := store.status(job.ID); got != anchora.Failed {
+	if got := store.status(job.ID); got != workflow.Failed {
 		t.Fatalf("status = %q, want failed", got)
 	}
 	if got := agent.count("second"); got != 0 {
@@ -552,7 +554,7 @@ func TestReaperReEnqueuesOrphanedJobs(t *testing.T) {
 	if pushed := queue.snapshot(&queue.pushed); len(pushed) != 1 || pushed[0] != job.ID {
 		t.Fatalf("pushed = %v, want the orphaned job re-enqueued", pushed)
 	}
-	if got := store.status(job.ID); got != anchora.Pending {
+	if got := store.status(job.ID); got != workflow.Pending {
 		t.Fatalf("status = %q, want pending", got)
 	}
 }
@@ -569,7 +571,7 @@ func TestProcessTreatsRefusedStepClaimAsLeaseLoss(t *testing.T) {
 
 	service.process(context.Background(), "worker-1", job.ID)
 
-	if got := store.status(job.ID); got == anchora.Failed {
+	if got := store.status(job.ID); got == workflow.Failed {
 		t.Fatal("a refused step claim must not fail the job; the new owner is still running it")
 	}
 	if got := agent.count("first"); got != 0 {

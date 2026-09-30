@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sagnikc395/anchora"
+	"github.com/sagnikc395/anchora/internal/workflow"
 )
 
 // Store is the durable record of every job, step, and event.
@@ -33,6 +33,8 @@ type WorkerInfo struct {
 	JobsClaimed int64     `json:"jobs_claimed"`
 }
 
+// NewStore connects to PostgreSQL, verifies the connection, and applies the
+// schema. The caller owns the returned store and must Close it.
 func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
@@ -50,6 +52,7 @@ func NewStore(ctx context.Context, databaseURL string) (*Store, error) {
 	return store, nil
 }
 
+// Close releases the connection pool.
 func (s *Store) Close() { s.pool.Close() }
 
 // schema is additive so it can run against a database created by an earlier
@@ -112,6 +115,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	return err
 }
 
+// Create records a job and its steps in one transaction, so a job is never
+// visible without the steps it is made of.
 func (s *Store) Create(ctx context.Context, job *Job) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -135,6 +140,8 @@ func (s *Store) Create(ctx context.Context, job *Job) error {
 	return tx.Commit(ctx)
 }
 
+// Get loads a job with its steps in declaration order. A job that does not
+// exist is reported as a nil job and a nil error.
 func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	job := &Job{ID: id}
 	var started, finished, lease *time.Time
@@ -159,7 +166,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Job, error) {
 	for rows.Next() {
 		var step Step
 		var deps []byte
-		var result anchora.StepResult
+		var result workflow.StepResult
 		if err := rows.Scan(&step.ID, &step.Agent, &step.Prompt, &deps, &result.Status, &result.Attempts, &result.Output, &result.Error); err != nil {
 			return nil, err
 		}
@@ -215,7 +222,7 @@ UPDATE workflow_jobs
 // FinishJob records a terminal state, but only if owner still holds the lease.
 // An empty owner matches an unclaimed job, which is how a job that failed to
 // dispatch is failed by the submitting request rather than by a worker.
-func (s *Store) FinishJob(ctx context.Context, id, owner string, status anchora.Status, jobErr string) (bool, error) {
+func (s *Store) FinishJob(ctx context.Context, id, owner string, status workflow.Status, jobErr string) (bool, error) {
 	tag, err := s.pool.Exec(ctx, `
 UPDATE workflow_jobs
    SET status=$3, error=$4, finished_at=now(), owner=NULL, lease_expires_at=NULL, updated_at=now()
@@ -245,7 +252,7 @@ UPDATE workflow_jobs
 // reapers from re-enqueuing the same job at the same moment.
 func (s *Store) ReclaimExpiredJobs(ctx context.Context, grace time.Duration, limit int) ([]string, error) {
 	if limit <= 0 {
-		limit = 100
+		limit = defaultReclaimBatch
 	}
 	rows, err := s.pool.Query(ctx, `
 UPDATE workflow_jobs
@@ -292,7 +299,7 @@ UPDATE workflow_steps s
 
 // UpdateStep persists a step result, fenced on the job lease so a worker that
 // lost its claim cannot overwrite the new owner's work.
-func (s *Store) UpdateStep(ctx context.Context, jobID, owner string, result anchora.StepResult) error {
+func (s *Store) UpdateStep(ctx context.Context, jobID, owner string, result workflow.StepResult) error {
 	_, err := s.pool.Exec(ctx, `
 UPDATE workflow_steps s
    SET status=$4, attempts=$5, output=$6, error=$7,
@@ -303,6 +310,8 @@ UPDATE workflow_steps s
 	return err
 }
 
+// AppendEvent adds one entry to a job's event log. Events are advisory: a
+// failure to record one never fails the job it describes.
 func (s *Store) AppendEvent(ctx context.Context, jobID, typ string, data any) error {
 	encoded, err := json.Marshal(data)
 	if err != nil {
@@ -312,6 +321,8 @@ func (s *Store) AppendEvent(ctx context.Context, jobID, typ string, data any) er
 	return err
 }
 
+// Events returns a job's events with an ID greater than after, in order, which
+// is how a dropped SSE stream resumes without replaying what it already sent.
 func (s *Store) Events(ctx context.Context, jobID string, after int64) ([]Event, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id,type,data,created_at FROM workflow_events WHERE job_id=$1 AND id>$2 ORDER BY id`, jobID, after)
 	if err != nil {

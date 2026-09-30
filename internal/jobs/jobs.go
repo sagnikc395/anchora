@@ -25,13 +25,49 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sagnikc395/anchora"
+	"github.com/sagnikc395/anchora/internal/workflow"
+)
+
+// Defaults applied to any Config field left at its zero value.
+const (
+	defaultLease          = 30 * time.Second
+	defaultReaperInterval = 5 * time.Second
+	defaultReclaimBatch   = 100
+)
+
+// Timeouts for the bookkeeping that must outlive a cancelled run: recording a
+// job's outcome, persisting a step, and unregistering a worker.
+const (
+	finishTimeout     = 10 * time.Second
+	stepWriteTimeout  = 5 * time.Second
+	unregisterTimeout = 5 * time.Second
 )
 
 // ErrLeaseLost reports that a worker's claim on a job was reclaimed while it
 // was still running. The worker abandons the job; it does not fail it.
 var ErrLeaseLost = errors.New("job lease lost")
 
+// The event types appended to a job's event log, in the order a successful job
+// normally produces them.
+const (
+	EventQueued        = "job.queued"
+	EventRunning       = "job.running"
+	EventResumed       = "job.resumed"
+	EventStepCompleted = "step.completed"
+	EventReclaimed     = "job.reclaimed"
+	EventAbandoned     = "job.abandoned"
+	EventDeadLettered  = "job.dead_lettered"
+	EventCompleted     = "job.completed"
+)
+
+// IsTerminal reports whether an event type ends a job's event stream, so a
+// reader knows when to stop without polling the job itself.
+func IsTerminal(eventType string) bool {
+	return eventType == EventCompleted || eventType == EventDeadLettered
+}
+
+// Step is one agent call in a submitted workflow. Unlike workflow.Step it names
+// its agent, because a job outlives the process that submitted it.
 type Step struct {
 	ID        string   `json:"id"`
 	Agent     string   `json:"agent"`
@@ -39,20 +75,24 @@ type Step struct {
 	DependsOn []string `json:"depends_on,omitempty"`
 }
 
+// Job is a submitted workflow and everything known about its execution: the
+// delivery count, the worker that currently owns it, and a result per step.
 type Job struct {
-	ID             string               `json:"id"`
-	Status         anchora.Status       `json:"status"`
-	Attempts       int                  `json:"attempts"`
-	Owner          string               `json:"owner,omitempty"`
-	Error          string               `json:"error,omitempty"`
-	CreatedAt      time.Time            `json:"created_at"`
-	StartedAt      *time.Time           `json:"started_at,omitempty"`
-	FinishedAt     *time.Time           `json:"finished_at,omitempty"`
-	LeaseExpiresAt *time.Time           `json:"lease_expires_at,omitempty"`
-	Steps          []Step               `json:"steps"`
-	Results        []anchora.StepResult `json:"results"`
+	ID             string                `json:"id"`
+	Status         workflow.Status       `json:"status"`
+	Attempts       int                   `json:"attempts"`
+	Owner          string                `json:"owner,omitempty"`
+	Error          string                `json:"error,omitempty"`
+	CreatedAt      time.Time             `json:"created_at"`
+	StartedAt      *time.Time            `json:"started_at,omitempty"`
+	FinishedAt     *time.Time            `json:"finished_at,omitempty"`
+	LeaseExpiresAt *time.Time            `json:"lease_expires_at,omitempty"`
+	Steps          []Step                `json:"steps"`
+	Results        []workflow.StepResult `json:"results"`
 }
 
+// Event is one entry in a job's append-only event log. ID is monotonic per
+// store, which is what lets an SSE reader resume from where it left off.
 type Event struct {
 	ID        int64           `json:"id"`
 	Type      string          `json:"type"`
@@ -67,8 +107,9 @@ type Stats struct {
 	Workers       []WorkerInfo `json:"workers"`
 }
 
+// AgentResolver maps a step's agent name to a runnable agent.
 type AgentResolver interface {
-	Resolve(string) (anchora.Agent, bool)
+	Resolve(string) (workflow.Agent, bool)
 }
 
 // JobStore is the durable half of the backend. *Store implements it.
@@ -77,11 +118,11 @@ type JobStore interface {
 	Get(ctx context.Context, id string) (*Job, error)
 	ClaimJob(ctx context.Context, id, owner string, lease time.Duration) (int, bool, error)
 	ExtendLease(ctx context.Context, id, owner string, lease time.Duration) (bool, error)
-	FinishJob(ctx context.Context, id, owner string, status anchora.Status, jobErr string) (bool, error)
+	FinishJob(ctx context.Context, id, owner string, status workflow.Status, jobErr string) (bool, error)
 	ReleaseJob(ctx context.Context, id, owner string) error
 	ReclaimExpiredJobs(ctx context.Context, grace time.Duration, limit int) ([]string, error)
 	ClaimStep(ctx context.Context, jobID, stepID, owner string) (bool, error)
-	UpdateStep(ctx context.Context, jobID, owner string, result anchora.StepResult) error
+	UpdateStep(ctx context.Context, jobID, owner string, result workflow.StepResult) error
 	AppendEvent(ctx context.Context, jobID, typ string, data any) error
 	Events(ctx context.Context, jobID string, after int64) ([]Event, error)
 	RegisterWorker(ctx context.Context, w WorkerInfo) error
@@ -124,11 +165,14 @@ type Config struct {
 	QueueName string
 }
 
+// Service is the job backend: it submits workflows, runs workers, and sweeps up
+// after workers that died. One Service is shared by the HTTP handlers and every
+// worker goroutine in a process.
 type Service struct {
 	Store   JobStore
 	Queue   JobQueue
 	Agents  AgentResolver
-	Options anchora.Options
+	Options workflow.Options
 	Config  Config
 	// Logf receives operational messages. It defaults to discarding them.
 	Logf func(format string, args ...any)
@@ -136,7 +180,7 @@ type Service struct {
 
 func (c Config) lease() time.Duration {
 	if c.Lease <= 0 {
-		return 30 * time.Second
+		return defaultLease
 	}
 	return c.Lease
 }
@@ -150,7 +194,7 @@ func (c Config) heartbeat() time.Duration {
 
 func (c Config) reaperInterval() time.Duration {
 	if c.ReaperInterval <= 0 {
-		return 5 * time.Second
+		return defaultReaperInterval
 	}
 	return c.ReaperInterval
 }
@@ -164,7 +208,7 @@ func (c Config) workerTTL() time.Duration {
 
 func (c Config) reclaimBatch() int {
 	if c.ReclaimBatch <= 0 {
-		return 100
+		return defaultReclaimBatch
 	}
 	return c.ReclaimBatch
 }
@@ -181,34 +225,36 @@ func (s *Service) Submit(ctx context.Context, steps []Step) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := anchora.NewWorkflow(workflowSteps, s.Options); err != nil {
+	if _, err := workflow.NewWorkflow(workflowSteps, s.Options); err != nil {
 		return nil, err
 	}
 	id, err := NewID()
 	if err != nil {
 		return nil, err
 	}
-	job := &Job{ID: id, Status: anchora.Pending, CreatedAt: time.Now().UTC(), Steps: steps, Results: make([]anchora.StepResult, len(steps))}
+	job := &Job{ID: id, Status: workflow.Pending, CreatedAt: time.Now().UTC(), Steps: steps, Results: make([]workflow.StepResult, len(steps))}
 	for i, step := range steps {
-		job.Results[i] = anchora.StepResult{ID: step.ID, Status: anchora.Pending}
+		job.Results[i] = workflow.StepResult{ID: step.ID, Status: workflow.Pending}
 	}
 	if err := s.Store.Create(ctx, job); err != nil {
 		return nil, err
 	}
-	if err := s.Store.AppendEvent(ctx, id, "job.queued", job); err != nil {
+	if err := s.Store.AppendEvent(ctx, id, EventQueued, job); err != nil {
 		return nil, err
 	}
 	if err := s.Queue.Push(ctx, id); err != nil {
 		// The job is durable but undispatched; the store reaper will not see
 		// it because it never ran. Surface the failure to the caller instead.
-		_, _ = s.Store.FinishJob(ctx, id, "", anchora.Failed, "enqueue failed: "+err.Error())
+		_, _ = s.Store.FinishJob(ctx, id, "", workflow.Failed, "enqueue failed: "+err.Error())
 		return nil, fmt.Errorf("enqueue job: %w", err)
 	}
 	return job, nil
 }
 
+// Get loads a job. A job that does not exist is a nil job and a nil error.
 func (s *Service) Get(ctx context.Context, id string) (*Job, error) { return s.Store.Get(ctx, id) }
 
+// Events returns a job's events recorded after the given event ID.
 func (s *Service) Events(ctx context.Context, id string, after int64) ([]Event, error) {
 	return s.Store.Events(ctx, id, after)
 }
@@ -235,7 +281,7 @@ func (s *Service) RunWorker(ctx context.Context, workerID string) error {
 		return fmt.Errorf("register worker: %w", err)
 	}
 	defer func() {
-		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), unregisterTimeout)
 		defer cancel()
 		if err := s.Store.UnregisterWorker(shutdown, workerID); err != nil {
 			s.logf("worker %s: unregister: %v", workerID, err)
@@ -310,7 +356,7 @@ func (s *Service) reap(ctx context.Context) {
 	} else {
 		for _, id := range recovered {
 			s.logf("reaper: requeued job %s after lease expiry", id)
-			_ = s.Store.AppendEvent(ctx, id, "job.reclaimed", map[string]string{"reason": "queue lease expired"})
+			_ = s.Store.AppendEvent(ctx, id, EventReclaimed, map[string]string{"reason": "queue lease expired"})
 		}
 	}
 	// Jobs whose queue entry vanished entirely — a Redis flush or failover —
@@ -328,7 +374,7 @@ func (s *Service) reap(ctx context.Context) {
 			continue
 		}
 		s.logf("reaper: re-enqueued orphaned job %s", id)
-		_ = s.Store.AppendEvent(ctx, id, "job.reclaimed", map[string]string{"reason": "store lease expired"})
+		_ = s.Store.AppendEvent(ctx, id, EventReclaimed, map[string]string{"reason": "store lease expired"})
 	}
 	if pruned, err := s.Store.PruneWorkers(ctx, s.Config.workerTTL()); err != nil {
 		if ctx.Err() == nil {
@@ -355,12 +401,12 @@ func (s *Service) process(ctx context.Context, workerID, id string) {
 		s.ack(ctx, id)
 		return
 	}
-	if max := s.Config.MaxAttempts; max > 0 && attempts > max {
-		s.deadLetter(ctx, workerID, id, attempts, max)
+	if limit := s.Config.MaxAttempts; limit > 0 && attempts > limit {
+		s.deadLetter(ctx, workerID, id, attempts, limit)
 		s.ack(ctx, id)
 		return
 	}
-	_ = s.Store.AppendEvent(ctx, id, "job.running", map[string]any{"status": anchora.Running, "worker": workerID, "attempt": attempts})
+	_ = s.Store.AppendEvent(ctx, id, EventRunning, map[string]any{"status": workflow.Running, "worker": workerID, "attempt": attempts})
 
 	runCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -376,17 +422,17 @@ func (s *Service) process(ctx context.Context, workerID, id string) {
 
 	// Finishing uses a context detached from the run so a shutdown mid-job
 	// still records the outcome rather than leaving the job leased.
-	final, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	final, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
 	defer finalCancel()
 
 	if infraErr != nil {
 		s.abandon(final, workerID, id, infraErr)
 		return
 	}
-	status := anchora.Succeeded
+	status := workflow.Succeeded
 	message := ""
 	if jobErr != nil {
-		status, message = anchora.Failed, jobErr.Error()
+		status, message = workflow.Failed, jobErr.Error()
 	}
 	for _, result := range results {
 		if err := s.Store.UpdateStep(final, id, workerID, result); err != nil {
@@ -404,7 +450,7 @@ func (s *Service) process(ctx context.Context, workerID, id string) {
 		s.logf("worker %s: job %s finished without a lease, discarding outcome", workerID, id)
 		return
 	}
-	_ = s.Store.AppendEvent(final, id, "job.completed", map[string]any{"status": status, "results": results, "worker": workerID, "attempt": attempts})
+	_ = s.Store.AppendEvent(final, id, EventCompleted, map[string]any{"status": status, "results": results, "worker": workerID, "attempt": attempts})
 	s.ack(final, id)
 }
 
@@ -443,7 +489,7 @@ func (s *Service) holdLease(ctx context.Context, cancel context.CancelCauseFunc,
 // runJob executes a job, resuming any steps that already succeeded. It
 // separates a workflow failure (terminal: the agents ran and something failed)
 // from an infrastructure failure (retryable: we lost the lease or shut down).
-func (s *Service) runJob(ctx context.Context, workerID, id string) (results []anchora.StepResult, jobErr, infraErr error) {
+func (s *Service) runJob(ctx context.Context, workerID, id string) (results []workflow.StepResult, jobErr, infraErr error) {
 	job, err := s.Store.Get(ctx, id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load job %s: %w", id, err)
@@ -466,26 +512,26 @@ func (s *Service) runJob(ctx context.Context, workerID, id string) (results []an
 
 	options := s.Options
 	options.Resume = resumable(job)
-	options.OnStepState = func(result anchora.StepResult) {
+	options.OnStepState = func(result workflow.StepResult) {
 		// Detached: a step that lands as the run is being cancelled should
 		// still be recorded, and it is fenced on the lease regardless.
-		write, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		write, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepWriteTimeout)
 		defer cancel()
 		if err := s.Store.UpdateStep(write, id, workerID, result); err != nil {
 			s.logf("worker %s: persist step %s of job %s: %v", workerID, result.ID, id, err)
 		}
-		_ = s.Store.AppendEvent(write, id, "step.completed", result)
+		_ = s.Store.AppendEvent(write, id, EventStepCompleted, result)
 	}
 	if len(options.Resume) > 0 {
 		s.logf("worker %s: resuming job %s with %d completed step(s)", workerID, id, len(options.Resume))
-		_ = s.Store.AppendEvent(ctx, id, "job.resumed", map[string]any{"completed": len(options.Resume)})
+		_ = s.Store.AppendEvent(ctx, id, EventResumed, map[string]any{"completed": len(options.Resume)})
 	}
 
-	workflow, err := anchora.NewWorkflow(steps, options)
+	wf, err := workflow.NewWorkflow(steps, options)
 	if err != nil {
 		return nil, err, nil
 	}
-	results, runErr := workflow.Run(ctx)
+	results, runErr := wf.Run(ctx)
 	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
 		return results, nil, cause
 	}
@@ -502,7 +548,7 @@ func (s *Service) runJob(ctx context.Context, workerID, id string) (results []an
 // reasons so another worker retries it promptly.
 func (s *Service) abandon(ctx context.Context, workerID, id string, cause error) {
 	s.logf("worker %s: abandoning job %s: %v", workerID, id, cause)
-	_ = s.Store.AppendEvent(ctx, id, "job.abandoned", map[string]string{"worker": workerID, "reason": cause.Error()})
+	_ = s.Store.AppendEvent(ctx, id, EventAbandoned, map[string]string{"worker": workerID, "reason": cause.Error()})
 	if errors.Is(cause, ErrLeaseLost) {
 		// Someone else already owns it; touching the queue would duplicate it.
 		return
@@ -517,13 +563,13 @@ func (s *Service) abandon(ctx context.Context, workerID, id string, cause error)
 }
 
 // deadLetter permanently fails a job that exhausted its delivery budget.
-func (s *Service) deadLetter(ctx context.Context, workerID, id string, attempts, max int) {
-	reason := fmt.Sprintf("exceeded %d delivery attempt(s)", max)
+func (s *Service) deadLetter(ctx context.Context, workerID, id string, attempts, limit int) {
+	reason := fmt.Sprintf("exceeded %d delivery attempt(s)", limit)
 	s.logf("worker %s: dead-lettering job %s after %d attempt(s)", workerID, id, attempts)
-	if _, err := s.Store.FinishJob(ctx, id, workerID, anchora.Failed, reason); err != nil {
+	if _, err := s.Store.FinishJob(ctx, id, workerID, workflow.Failed, reason); err != nil {
 		s.logf("worker %s: dead-letter job %s: %v", workerID, id, err)
 	}
-	_ = s.Store.AppendEvent(ctx, id, "job.dead_lettered", map[string]any{"attempts": attempts, "max_attempts": max, "worker": workerID})
+	_ = s.Store.AppendEvent(ctx, id, EventDeadLettered, map[string]any{"attempts": attempts, "max_attempts": limit, "worker": workerID})
 }
 
 func (s *Service) ack(ctx context.Context, id string) {
@@ -532,14 +578,14 @@ func (s *Service) ack(ctx context.Context, id string) {
 	}
 }
 
-func (s *Service) resolveSteps(inputs []Step) ([]anchora.Step, error) {
-	steps := make([]anchora.Step, 0, len(inputs))
+func (s *Service) resolveSteps(inputs []Step) ([]workflow.Step, error) {
+	steps := make([]workflow.Step, 0, len(inputs))
 	for _, input := range inputs {
 		agent, ok := s.Agents.Resolve(input.Agent)
 		if !ok {
 			return nil, fmt.Errorf("unknown agent: %s", input.Agent)
 		}
-		steps = append(steps, anchora.Step{ID: input.ID, Agent: agent, Prompt: input.Prompt, DependsOn: input.DependsOn})
+		steps = append(steps, workflow.Step{ID: input.ID, Agent: agent, Prompt: input.Prompt, DependsOn: input.DependsOn})
 	}
 	return steps, nil
 }
@@ -553,7 +599,7 @@ type leaseFence struct{ lost atomic.Bool }
 type fencedAgent struct {
 	fence                *leaseFence
 	store                JobStore
-	inner                anchora.Agent
+	inner                workflow.Agent
 	jobID, stepID, owner string
 }
 
@@ -571,10 +617,10 @@ func (a fencedAgent) Run(ctx context.Context, prompt string) (string, error) {
 
 // resumable returns the results of steps that already succeeded on a previous
 // delivery, so they are replayed rather than re-executed.
-func resumable(job *Job) []anchora.StepResult {
-	var done []anchora.StepResult
+func resumable(job *Job) []workflow.StepResult {
+	var done []workflow.StepResult
 	for _, result := range job.Results {
-		if result.Status == anchora.Succeeded {
+		if result.Status == workflow.Succeeded {
 			done = append(done, result)
 		}
 	}
