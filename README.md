@@ -16,6 +16,45 @@ There is no UI, authentication, or scheduler. Agents are the one abstraction:
 a small `Agent` interface in this repository, wired by the executable to an
 Eino chat model that speaks to any OpenAI-compatible provider.
 
+## Architecture at a glance
+
+Two entry points, one engine:
+
+```mermaid
+flowchart TD
+    Client([Client])
+
+    subgraph API["HTTP API"]
+        Run["POST /v1/workflows/run<br/>synchronous"]
+        Jobs["POST /v1/jobs, GET /v1/jobs/:id<br/>plus /events and /cluster"]
+    end
+
+    Engine["Workflow engine<br/>DAG validation, ready-wave execution"]
+    Agent["Agent interface<br/>Run(context, prompt) to output, error"]
+    Provider["Eino chat model<br/>OpenAI-compatible provider"]
+
+    subgraph Async["Durable jobs, optional"]
+        Queue[("Redis<br/>ready list + lease set")]
+        Store[("PostgreSQL<br/>jobs, steps, events")]
+        Workers["Worker pool + reaper"]
+    end
+
+    Client --> Run
+    Client --> Jobs
+    Run -- inline --> Engine
+    Jobs --> Store
+    Jobs --> Queue
+    Queue --> Workers
+    Workers -- same engine --> Engine
+    Workers -. heartbeat, renew lease .-> Store
+    Engine --> Agent --> Provider
+```
+
+Read it top to bottom: a client request either runs the engine in the request
+itself, or is stored and queued for a worker pool that runs that same engine and
+returns results through PostgreSQL. Either way the engine only ever talks to the
+`Agent` interface, so the provider behind it is swappable.
+
 ## A workflow
 
 Each step has an `id`, an `agent`, a `prompt`, and optionally `depends_on`.
