@@ -395,11 +395,10 @@ task services-logs
 
 Unit tests cover the workflow engine (DAG validation, concurrent waves,
 retries, skip cascades, and resume), every HTTP route including the SSE stream,
-the Eino model adapter, configuration, and the worker lifecycle (claim, resume,
-duplicate delivery, lease loss, shutdown requeue, dead-lettering, and reaping).
-They run against in-memory fakes, so they need no services.
+the Eino model adapter, and configuration. They live in `tests/`, a single
+black-box package, and run against in-memory fakes, so they need no services.
 
-The Lua scripts and SQL in `internal/jobs/store.go` and `internal/jobs/queue.go`
+The Lua scripts and SQL in `lib/jobs/store.go` and `lib/jobs/queue.go`
 are the one part
 the fakes cannot stand in for, so they are covered separately by tests that
 need real servers. Those skip unless both URLs are set; `task test-integration`
@@ -411,32 +410,7 @@ task test-integration
 # or, against your own instances (the Redis database given is written to):
 ANCHORA_TEST_DATABASE_URL='postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable' \
 ANCHORA_TEST_REDIS_URL='redis://localhost:6379/1' \
-  go test -race -count=1 -run Integration ./internal/jobs/
+  go test -race -count=1 -run Integration ./tests/
 ```
 
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-## Repository map
-
-```text
-cmd/anchora/main.go             executable entrypoint
-internal/workflow/workflow.go   DAG validation and execution
-internal/httpapi/router.go      HTTP routes and SSE polling
-internal/jobs/jobs.go           submission, worker lifecycle, reaper
-internal/jobs/store.go          PostgreSQL schema, leases, worker registry
-internal/jobs/queue.go          Redis queue: atomic claim, lease, reclaim
-internal/einoagent/agent.go     Eino OpenAI-compatible model adapter (Hugging Face by default)
-internal/config/config.go       YAML and environment configuration
-config.yaml                     the configuration the server starts with
-Dockerfile                      static build on distroless, non-root
-docker-compose.yml              PostgreSQL, Redis, and the app under the `app` profile
-examples/workflow.json          a two-step request body for the curl examples
-.github/workflows/ci.yml        build, vet, gofmt, tests, and the integration suite
-```
-
-Anchora ships as a binary, not as a library: everything but `cmd/anchora` lives
-under `internal/`, so the HTTP API and `config.yaml` are the whole compatibility
-surface and the packages behind them stay free to change.
 

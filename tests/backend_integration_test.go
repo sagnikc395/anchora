@@ -1,4 +1,4 @@
-package jobs
+package tests
 
 import (
 	"context"
@@ -6,16 +6,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sagnikc395/anchora/lib/jobs"
 	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
-func testQueue(t *testing.T) *Queue {
+func testQueue(t *testing.T) *jobs.Queue {
 	t.Helper()
 	url := os.Getenv("ANCHORA_TEST_REDIS_URL")
 	if url == "" {
 		t.Skip("set ANCHORA_TEST_REDIS_URL to run the Redis integration tests")
 	}
-	queue, err := NewQueue(context.Background(), url, "anchora:test:"+randomSuffix(t))
+	queue, err := jobs.NewQueue(context.Background(), url, "anchora:test:"+randomSuffix(t))
 	if err != nil {
 		t.Fatalf("connect Redis: %v", err)
 	}
@@ -23,13 +24,13 @@ func testQueue(t *testing.T) *Queue {
 	return queue
 }
 
-func testStore(t *testing.T) *Store {
+func testStore(t *testing.T) *jobs.Store {
 	t.Helper()
 	url := os.Getenv("ANCHORA_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set ANCHORA_TEST_DATABASE_URL to run the PostgreSQL integration tests")
 	}
-	store, err := NewStore(context.Background(), url)
+	store, err := jobs.NewStore(context.Background(), url)
 	if err != nil {
 		t.Fatalf("connect PostgreSQL: %v", err)
 	}
@@ -39,22 +40,22 @@ func testStore(t *testing.T) *Store {
 
 func randomSuffix(t *testing.T) string {
 	t.Helper()
-	id, err := NewID()
+	id, err := jobs.NewID()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return id[:12]
 }
 
-func seedJob(t *testing.T, store *Store) *Job {
+func seedJob(t *testing.T, store *jobs.Store) *jobs.Job {
 	t.Helper()
-	id, err := NewID()
+	id, err := jobs.NewID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := &Job{
+	job := &jobs.Job{
 		ID: id, Status: workflow.Pending, CreatedAt: time.Now().UTC(),
-		Steps:   []Step{{ID: "one", Agent: "a", Prompt: "first"}},
+		Steps:   []jobs.Step{{ID: "one", Agent: "a", Prompt: "first"}},
 		Results: []workflow.StepResult{{ID: "one", Status: workflow.Pending}},
 	}
 	if err := store.Create(context.Background(), job); err != nil {
@@ -300,7 +301,7 @@ func TestIntegrationStoreWorkerRegistry(t *testing.T) {
 	ctx := context.Background()
 	id := "worker-" + randomSuffix(t)
 
-	if err := store.RegisterWorker(ctx, WorkerInfo{ID: id, Hostname: "host", PID: 1234, Queue: "q"}); err != nil {
+	if err := store.RegisterWorker(ctx, jobs.WorkerInfo{ID: id, Hostname: "host", PID: 1234, Queue: "q"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.HeartbeatWorker(ctx, id, 3); err != nil {
@@ -337,17 +338,24 @@ func TestIntegrationStoreWorkerRegistry(t *testing.T) {
 }
 
 // The headline guarantee: a worker that dies mid-job loses it to another
-// worker, which resumes rather than re-running the completed steps.
+// worker, which resumes rather than re-running the completed steps. Recovery
+// goes through the public RunReaper and RunWorker loops, which is how it
+// happens in production.
 func TestIntegrationCrashRecoveryResumesJob(t *testing.T) {
 	store, queue := testStore(t), testQueue(t)
 	ctx := context.Background()
 	agent := newCountingAgent()
-	service := &Service{
+	service := &jobs.Service{
 		Store: store, Queue: queue, Agents: registry{"a": agent},
-		Config: Config{Lease: 200 * time.Millisecond, Heartbeat: 50 * time.Millisecond, MaxAttempts: 5},
-		Logf:   func(format string, args ...any) { t.Logf(format, args...) },
+		Config: jobs.Config{
+			Lease:          200 * time.Millisecond,
+			Heartbeat:      50 * time.Millisecond,
+			MaxAttempts:    5,
+			ReaperInterval: 20 * time.Millisecond,
+		},
+		Logf: func(format string, args ...any) { t.Logf(format, args...) },
 	}
-	job, err := service.Submit(ctx, []Step{
+	job, err := service.Submit(ctx, []jobs.Step{
 		{ID: "one", Agent: "a", Prompt: "first"},
 		{ID: "two", Agent: "a", Prompt: "second", DependsOn: []string{"one"}},
 	})
@@ -367,13 +375,33 @@ func TestIntegrationCrashRecoveryResumesJob(t *testing.T) {
 	}
 	time.Sleep(300 * time.Millisecond)
 
-	// The reaper hands it to a live worker.
-	service.reap(ctx)
-	id, err := queue.Claim(ctx, "live-worker", time.Minute)
-	if err != nil || id != job.ID {
-		t.Fatalf("claim after reap = %q, %v; want the recovered job", id, err)
+	// The reaper hands the delivery to a live worker's loop, which claims and
+	// resumes the job. Both are cancelled once the outcome is recorded.
+	reaperCtx, stopReaper := context.WithCancel(ctx)
+	defer stopReaper()
+	go func() { _ = service.RunReaper(reaperCtx) }()
+
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	defer stopWorker()
+	go func() { _ = service.RunWorker(workerCtx, "live-worker") }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fetched, err := store.Get(ctx, job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fetched.Status == workflow.Failed {
+			t.Fatalf("recovered job failed: %s", fetched.Error)
+		}
+		if fetched.Status == workflow.Succeeded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s was not recovered; status = %q (error %q)", job.ID, fetched.Status, fetched.Error)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	service.process(ctx, "live-worker", job.ID)
 
 	if got := agent.count("first"); got != 0 {
 		t.Fatalf("the completed step re-ran %d time(s); resume did not take effect", got)

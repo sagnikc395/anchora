@@ -1,4 +1,4 @@
-package einoagent
+package tests
 
 import (
 	"context"
@@ -6,7 +6,13 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/sagnikc395/anchora/lib/einoagent"
 )
+
+// defaultBaseURL pins the router base the adapter falls back to, so a silent
+// change of endpoint fails loudly here.
+const defaultBaseURL = "https://router.huggingface.co/v1"
 
 type roundTripper func(*http.Request) (*http.Response, error)
 
@@ -45,7 +51,7 @@ func TestRunUsesEinoOpenAICompatibleModel(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"Hi"}}]}`)), Header: make(http.Header)}, nil
 	})}
-	agent, err := New(context.Background(), Config{Name: "assistant", ModelID: "HuggingFaceTB/SmolLM3-3B:fastest", TokenEnv: "TEST_HF_TOKEN", Instruction: "Be concise.", MaxTokens: 64, HTTPClient: client})
+	agent, err := einoagent.New(context.Background(), einoagent.Config{Name: "assistant", ModelID: "HuggingFaceTB/SmolLM3-3B:fastest", TokenEnv: "TEST_HF_TOKEN", Instruction: "Be concise.", MaxTokens: 64, HTTPClient: client})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,13 +63,13 @@ func TestRunUsesEinoOpenAICompatibleModel(t *testing.T) {
 
 func TestNewRejectsIncompleteConfig(t *testing.T) {
 	t.Setenv("TEST_HF_TOKEN", "secret")
-	tests := map[string]Config{
+	tests := map[string]einoagent.Config{
 		"no name":     {ModelID: "m", TokenEnv: "TEST_HF_TOKEN"},
 		"no model ID": {Name: "a", TokenEnv: "TEST_HF_TOKEN"},
 	}
 	for name, config := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, err := New(context.Background(), config); err == nil {
+			if _, err := einoagent.New(context.Background(), config); err == nil {
 				t.Fatal("expected a validation error")
 			}
 		})
@@ -74,7 +80,7 @@ func TestNewRejectsIncompleteConfig(t *testing.T) {
 // caught at startup rather than on the first workflow step.
 func TestNewRequiresTheConfiguredToken(t *testing.T) {
 	t.Setenv("TEST_HF_TOKEN", "")
-	_, err := New(context.Background(), Config{Name: "a", ModelID: "m", TokenEnv: "TEST_HF_TOKEN"})
+	_, err := einoagent.New(context.Background(), einoagent.Config{Name: "a", ModelID: "m", TokenEnv: "TEST_HF_TOKEN"})
 	if err == nil {
 		t.Fatal("expected an error when the token variable is unset")
 	}
@@ -85,7 +91,7 @@ func TestNewRequiresTheConfiguredToken(t *testing.T) {
 
 func TestNewDefaultsToHuggingFaceToken(t *testing.T) {
 	t.Setenv("HF_TOKEN", "secret")
-	if _, err := New(context.Background(), Config{Name: "a", ModelID: "m"}); err != nil {
+	if _, err := einoagent.New(context.Background(), einoagent.Config{Name: "a", ModelID: "m"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -99,7 +105,7 @@ func TestRunRejectsEmptyCompletion(t *testing.T) {
 		"whitespace content": `{"choices":[{"message":{"role":"assistant","content":"  \n "}}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			agent, err := New(context.Background(), Config{
+			agent, err := einoagent.New(context.Background(), einoagent.Config{
 				Name: "a", ModelID: "m", TokenEnv: "TEST_HF_TOKEN", HTTPClient: respondWith(body),
 			})
 			if err != nil {
@@ -113,11 +119,11 @@ func TestRunRejectsEmptyCompletion(t *testing.T) {
 }
 
 func TestRunOnUninitializedAgent(t *testing.T) {
-	var agent *Agent
+	var agent *einoagent.Agent
 	if _, err := agent.Run(context.Background(), "Hello"); err == nil {
 		t.Fatal("expected an error from a nil agent")
 	}
-	if _, err := (&Agent{}).Run(context.Background(), "Hello"); err == nil {
+	if _, err := (&einoagent.Agent{}).Run(context.Background(), "Hello"); err == nil {
 		t.Fatal("expected an error from an agent with no model")
 	}
 }

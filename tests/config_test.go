@@ -1,4 +1,4 @@
-package config_test
+package tests
 
 import (
 	"os"
@@ -181,7 +181,7 @@ func TestAsyncURLsComeFromNamedVariables(t *testing.T) {
 // The checked-in configuration must always load, since it is what the README
 // tells a reader to start with.
 func TestCheckedInConfigLoads(t *testing.T) {
-	if _, err := config.Load(filepath.Join("..", "..", "config.yaml")); err != nil {
+	if _, err := config.Load(filepath.Join("..", "config.yaml")); err != nil {
 		t.Fatalf("config.yaml does not load: %v", err)
 	}
 }

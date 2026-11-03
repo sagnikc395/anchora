@@ -1,27 +1,20 @@
-package httpapi_test
+package tests
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/sagnikc395/anchora/internal/httpapi"
-	"github.com/sagnikc395/anchora/internal/workflow"
+	"github.com/sagnikc395/anchora/lib/httpapi"
+	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
 type fakeAgent struct{}
 
 func (fakeAgent) Run(_ context.Context, prompt string) (string, error) { return "done: " + prompt, nil }
-
-type failingAgent struct{}
-
-func (failingAgent) Run(context.Context, string) (string, error) {
-	return "", errors.New("provider unavailable")
-}
 
 func newRouter(agents httpapi.AgentRegistry) http.Handler {
 	return httpapi.NewRouter(agents, httpapi.Options{})

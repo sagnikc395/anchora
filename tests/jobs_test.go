@@ -1,4 +1,4 @@
-package httpapi_test
+package tests
 
 import (
 	"context"
@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagnikc395/anchora/internal/httpapi"
-	"github.com/sagnikc395/anchora/internal/jobs"
-	"github.com/sagnikc395/anchora/internal/workflow"
+	"github.com/sagnikc395/anchora/lib/httpapi"
+	"github.com/sagnikc395/anchora/lib/jobs"
+	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
 // stubStore implements jobs.JobStore with just enough behaviour to drive the

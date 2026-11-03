@@ -1,4 +1,4 @@
-package workflow_test
+package tests
 
 import (
 	"context"
@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagnikc395/anchora/internal/workflow"
+	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
-// fakeAgent fails its first `failures` calls and then succeeds, which is how
+// flakyAgent fails its first `failures` calls and then succeeds, which is how
 // the retry path is exercised without waiting on anything real.
-type fakeAgent struct{ calls, failures int }
+type flakyAgent struct{ calls, failures int }
 
-func (a *fakeAgent) Run(_ context.Context, prompt string) (string, error) {
+func (a *flakyAgent) Run(_ context.Context, prompt string) (string, error) {
 	a.calls++
 	if a.calls <= a.failures {
 		return "", errors.New("temporary failure")
@@ -50,7 +50,7 @@ func TestWorkflowRunsDAGAndPassesOutputs(t *testing.T) {
 }
 
 func TestWorkflowRetriesAndSucceeds(t *testing.T) {
-	agent := &fakeAgent{failures: 2}
+	agent := &flakyAgent{failures: 2}
 	w, err := workflow.NewWorkflow([]workflow.Step{{ID: "one", Agent: agent, Prompt: "work"}},
 		workflow.Options{MaxRetries: 2, RetryDelay: time.Millisecond})
 	if err != nil {
@@ -143,7 +143,7 @@ func TestWorkflowRendersConcurrentWaveWithoutRacing(t *testing.T) {
 }
 
 func TestWorkflowResumeSkipsCompletedSteps(t *testing.T) {
-	agent := &fakeAgent{}
+	agent := &flakyAgent{}
 	w, err := workflow.NewWorkflow([]workflow.Step{
 		{ID: "research", Agent: agent, Prompt: "facts"},
 		{ID: "summary", Agent: agent, Prompt: "summarize {{steps.research.output}}", DependsOn: []string{"research"}},
@@ -169,7 +169,7 @@ func TestWorkflowResumeSkipsCompletedSteps(t *testing.T) {
 }
 
 func TestWorkflowResumeIgnoresUnfinishedResults(t *testing.T) {
-	agent := &fakeAgent{}
+	agent := &flakyAgent{}
 	w, err := workflow.NewWorkflow([]workflow.Step{{ID: "one", Agent: agent, Prompt: "work"}},
 		workflow.Options{Resume: []workflow.StepResult{{ID: "one", Status: workflow.Failed, Error: "boom"}}})
 	if err != nil {
