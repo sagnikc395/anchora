@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/sagnikc395/anchora/internal/workflow"
+	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
 // Store is the durable record of every job, step, and event.

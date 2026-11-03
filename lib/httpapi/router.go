@@ -17,8 +17,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/sagnikc395/anchora/internal/jobs"
-	"github.com/sagnikc395/anchora/internal/workflow"
+	"github.com/sagnikc395/anchora/lib/jobs"
+	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
 // maxRequestBytes bounds a workflow submission so an oversized body is

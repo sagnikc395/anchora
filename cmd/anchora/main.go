@@ -18,11 +18,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sagnikc395/anchora/internal/config"
-	"github.com/sagnikc395/anchora/internal/einoagent"
-	"github.com/sagnikc395/anchora/internal/httpapi"
-	"github.com/sagnikc395/anchora/internal/jobs"
-	"github.com/sagnikc395/anchora/internal/workflow"
+	"github.com/sagnikc395/anchora/lib/config"
+	"github.com/sagnikc395/anchora/lib/einoagent"
+	"github.com/sagnikc395/anchora/lib/httpapi"
+	"github.com/sagnikc395/anchora/lib/jobs"
+	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
 const (

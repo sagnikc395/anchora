@@ -6,17 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagnikc395/anchora/internal/workflow"
+	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
-// These tests exercise the Lua scripts and SQL against real servers. They are
-// skipped unless both URLs are set:
-//
-//	ANCHORA_TEST_DATABASE_URL=postgres://anchora:anchora@localhost:5432/anchora \
-//	ANCHORA_TEST_REDIS_URL=redis://localhost:6379/1 \
-//	go test ./jobs/ -run Integration
-//
-// The Redis database given is flushed, so point it at a scratch one.
 func testQueue(t *testing.T) *Queue {
 	t.Helper()
 	url := os.Getenv("ANCHORA_TEST_REDIS_URL")

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sagnikc395/anchora/internal/config"
+	"github.com/sagnikc395/anchora/lib/config"
 )
 
 func write(t *testing.T, body string) string {
