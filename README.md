@@ -1,19 +1,11 @@
 # anchora
 
-[![CI](https://github.com/sagnikc395/anchora/actions/workflows/ci.yml/badge.svg)](https://github.com/sagnikc395/anchora/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/go-1.25-00ADD8.svg)](go.mod)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Anchora runs small workflows made of dependent agent calls. You describe the
-steps, Anchora checks that their dependencies form a valid DAG, runs steps that
-are ready at the same time, and makes successful outputs available to later
-steps.
+anchora runs small workflows made of dependent agent calls. As user describe the steps, Anchora checks that their dependencies form a valid DAG, runs steps that are ready at the same time, and makes successful outputs available to later steps.
 
-It is a Go service with an HTTP API. Workflows can run in the request that
-started them, or they can be submitted as jobs backed by PostgreSQL and Redis
+Workflows can run in the request that started them, or they can be submitted as jobs backed by PostgreSQL and Redis
 and executed by a pool of workers that survives losing any of its nodes.
-There is no UI, authentication, or scheduler. Agents are the one abstraction:
-a small `Agent` interface in this repository, wired by the executable to an
+Agents are the one abstraction that you deal with here : a small `Agent` interface in this repository, wired by the executable to an
 Eino chat model that speaks to any OpenAI-compatible provider.
 
 ## Architecture at a glance
