@@ -19,15 +19,13 @@ import (
 // Status is the execution state of a single step.
 type Status string
 
-// The states a step can be in. Retrying is transient and only ever observed
-// through [Options.OnStepState]; everything a step store records is one of the
-// other five.
+// The states a step can be in. Everything a step store records is one of
+// these; a failed workflow's partial results report them in declaration order.
 const (
 	Pending   Status = "pending"
 	Running   Status = "running"
 	Succeeded Status = "succeeded"
 	Failed    Status = "failed"
-	Retrying  Status = "retrying"
 	Skipped   Status = "skipped"
 )
 
@@ -228,7 +226,7 @@ func skipBlocked(remaining map[string]Step, results map[string]StepResult) {
 // runStep calls an agent, retrying on failure with a linear backoff, and
 // reports the terminal outcome. Attempts counts the retries it needed.
 func (w *Workflow) runStep(ctx context.Context, id string, agent Agent, prompt string) StepResult {
-	result := StepResult{ID: id, Status: Running}
+	result := StepResult{ID: id}
 	for {
 		output, err := agent.Run(ctx, prompt)
 		if err == nil {
@@ -241,7 +239,6 @@ func (w *Workflow) runStep(ctx context.Context, id string, agent Agent, prompt s
 			return result
 		}
 		result.Attempts++
-		result.Status = Retrying
 		delay := time.Duration(result.Attempts) * w.options.RetryDelay
 		select {
 		case <-ctx.Done():

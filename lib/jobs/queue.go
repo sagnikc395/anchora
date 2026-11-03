@@ -26,7 +26,6 @@ import (
 type Queue struct {
 	client                        *redis.Client
 	ready, leases, owners, notify string
-	waitTimeout                   time.Duration
 }
 
 const (
@@ -115,12 +114,11 @@ func NewQueue(ctx context.Context, redisURL, name string) (*Queue, error) {
 		return nil, fmt.Errorf("connect Redis: %w", err)
 	}
 	return &Queue{
-		client:      client,
-		ready:       name,
-		leases:      name + ":leases",
-		owners:      name + ":owners",
-		notify:      name + ":notify",
-		waitTimeout: claimWait,
+		client: client,
+		ready:  name,
+		leases: name + ":leases",
+		owners: name + ":owners",
+		notify: name + ":notify",
 	}, nil
 }
 
@@ -147,7 +145,7 @@ func (q *Queue) Claim(ctx context.Context, owner string, lease time.Duration) (s
 	// Nothing ready. Park on the notify list so a Push wakes us immediately;
 	// the timeout bounds the cost of a hint that was consumed by another
 	// worker, since the claim script above remains the source of truth.
-	if err := q.client.BRPop(ctx, q.waitTimeout, q.notify).Err(); err != nil && !errors.Is(err, redis.Nil) {
+	if err := q.client.BRPop(ctx, claimWait, q.notify).Err(); err != nil && !errors.Is(err, redis.Nil) {
 		return "", err
 	}
 	return "", nil

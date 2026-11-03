@@ -81,9 +81,9 @@ workflow returns the results collected up to that point as well as the failing
 step.
 
 Retries are configured globally. `max_retries` counts attempts after the first
-call, and the delay is linear: retry number × `retry_delay_ms`. `Retrying` is an
-in-memory execution state; persisted step states are the states represented in
-the job store (`pending`, `running`, `succeeded`, `failed`, and `skipped`).
+call, and the delay is linear: retry number × `retry_delay_ms`. Persisted step
+states are the states represented in the job store (`pending`, `running`,
+`succeeded`, `failed`, and `skipped`).
 
 ## How it fits together
 
