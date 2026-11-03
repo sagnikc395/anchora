@@ -1,5 +1,6 @@
 # anchora
 
+<img src="./assets/logo.png" width="200px" height="200px" />
 
 anchora runs small workflows made of dependent agent calls. As user describe the steps, Anchora checks that their dependencies form a valid DAG, runs steps that are ready at the same time, and makes successful outputs available to later steps.
 
