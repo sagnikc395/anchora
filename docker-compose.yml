@@ -23,6 +23,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # The Python agent sidecar (agent/main.py): a Hugging Face transformers
+  # model served over POST /run. Anchora's agent entries point at it —
+  # http://agent:8000 from the anchora container, http://localhost:8000 from
+  # the host (port mapped). The model cache volume keeps the weight download
+  # on restarts.
+  agent:
+    profiles: ["app"]
+    build: ./agent
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_NAME: Qwen/Qwen3-0.6B
+      MAX_NEW_TOKENS: "256"
+    volumes:
+      - agent-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 300s
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -59,6 +82,53 @@ services:
       timeout: 3s
       retries: 10
 
+  # Observability stack, started only with `--profile telemetry`. Prometheus
+  # scrapes an Anchora running on the host (host.docker.internal); Promtail
+  # tails ./logs, where the host-run binary writes. `task telemetry-up`.
+  prometheus:
+    profiles: ["telemetry"]
+    image: prom/prometheus:v3.8.0
+    command:
+      - --config.file=/etc/prometheus/config.yml
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./telemetry/prometheus/prometheus.yml:/etc/prometheus/config.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    profiles: ["telemetry"]
+    image: grafana/grafana:12.3.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./telemetry/grafana/provisioning:/etc/grafana/provisioning:ro
+
+  loki:
+    profiles: ["telemetry"]
+    image: grafana/loki:3.4.0
+    command:
+      - -config.file=/etc/loki/loki-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./telemetry/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+
+  promtail:
+    profiles: ["telemetry"]
+    image: grafana/promtail:3.4.0
+    command:
+      - -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./logs:/var/log/anchora:ro
+      - ./telemetry/promtail/promtail.yml:/etc/promtail/config.yml:ro
+
 volumes:
   postgres-data:
   redis-data:
+  agent-cache:

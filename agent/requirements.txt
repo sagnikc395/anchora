@@ -1,0 +1,6 @@
+# Pinned to the versions the e2e run validated; bump deliberately.
+fastapi==0.162.0
+uvicorn==0.54.0
+transformers==5.22.1
+accelerate==1.15.0
+torch==2.15.0

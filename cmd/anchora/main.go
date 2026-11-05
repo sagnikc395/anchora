@@ -19,9 +19,10 @@ import (
 	"time"
 
 	"github.com/sagnikc395/anchora/lib/config"
-	"github.com/sagnikc395/anchora/lib/einoagent"
 	"github.com/sagnikc395/anchora/lib/httpapi"
 	"github.com/sagnikc395/anchora/lib/jobs"
+	"github.com/sagnikc395/anchora/lib/metrics"
+	"github.com/sagnikc395/anchora/lib/remoteagent"
 	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
@@ -33,6 +34,8 @@ const (
 	// readHeaderTimeout bounds request headers only. The SSE endpoint streams
 	// for as long as a job runs, so the body and response stay unbounded.
 	readHeaderTimeout = 10 * time.Second
+	// metricsInterval is how often the backend depth gauges are refreshed.
+	metricsInterval = 5 * time.Second
 )
 
 func main() {
@@ -52,7 +55,7 @@ func run(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	agents, err := buildAgents(ctx, cfg.Agents)
+	agents, err := buildAgents(cfg.Agents)
 	if err != nil {
 		return err
 	}
@@ -110,18 +113,15 @@ func run(configPath string) error {
 	return nil
 }
 
-// buildAgents constructs every configured agent up front, so a bad model or a
-// missing token is a startup failure rather than a failed workflow step.
-func buildAgents(ctx context.Context, definitions map[string]config.Agent) (httpapi.AgentRegistry, error) {
+// buildAgents constructs every configured agent up front, so a bad agent URL
+// is a startup failure rather than a failed workflow step.
+func buildAgents(definitions map[string]config.Agent) (httpapi.AgentRegistry, error) {
 	agents := make(httpapi.AgentRegistry, len(definitions))
 	for name, definition := range definitions {
-		agent, err := einoagent.New(ctx, einoagent.Config{
+		agent, err := remoteagent.New(remoteagent.Config{
 			Name:        name,
-			ModelID:     definition.ModelID,
-			BaseURL:     definition.BaseURL,
-			TokenEnv:    definition.TokenEnv,
+			URL:         definition.URL,
 			Instruction: definition.Instruction,
-			MaxTokens:   definition.MaxTokens,
 			Timeout:     definition.Timeout(),
 		})
 		if err != nil {
@@ -196,6 +196,24 @@ func startWorkers(ctx context.Context, workers *sync.WaitGroup, service *jobs.Se
 			}
 		}()
 	}
+	// Mirror the backend depth numbers into the metrics surface at scrape
+	// cadence; /metrics itself only serves what this poller last saw.
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(metricsInterval)
+		defer ticker.Stop()
+		for {
+			if stats, err := service.Stats(ctx); err == nil {
+				metrics.SetQueue(stats.QueueReady, stats.QueueInFlight, int64(len(stats.Workers)))
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	log.Printf("async enabled: %d worker(s), %s lease, reaper=%t",
 		async.WorkerCount(), async.Lease(), async.ReaperEnabled())
 	return nil

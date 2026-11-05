@@ -5,9 +5,9 @@ workflow:
   max_retries: 2
   retry_delay_ms: 500
 
-# Set enabled to true to expose the asynchronous job API. DATABASE_URL and
-# REDIS_URL must then point to PostgreSQL and Redis, respectively.
 async:
+  # Turn this on to expose the job API; DATABASE_URL and REDIS_URL must then
+  # point at PostgreSQL and Redis.
   enabled: false
   database_url_env: DATABASE_URL
   redis_url_env: REDIS_URL
@@ -32,6 +32,13 @@ async:
   # sweeps are atomic. Set false only if you run a dedicated reaper process.
   reaper: true
 
-# Named Hugging Face agents are optional. Set HF_TOKEN (or each agent's
-# token_env) before starting the server.
-agents: {}
+# Named agents point at the Python agent service (agent/main.py), which serves
+# a Hugging Face transformers model such as Qwen/Qwen3-0.6B and applies the
+# instruction to the chat template. `ollama`/OpenAI providers are no longer
+# involved. The service listens on :8000; rerun it with MODEL_NAME to serve a
+# different model.
+agents:
+  research:
+    url: http://localhost:8000
+    instruction: You are a concise research assistant.
+    timeout_ms: 120000

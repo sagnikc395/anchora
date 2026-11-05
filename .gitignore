@@ -3,6 +3,9 @@
 /bin/
 *.exe
 
+# Runtime logs shipped to Loki by promtail
+/logs/
+
 # Test and coverage output
 *.test
 coverage.out
@@ -12,6 +15,7 @@ coverage.html
 .env
 !.env.example
 config.local.yaml
+agent/.venv/
 
 # Editor and OS cruft
 .DS_Store

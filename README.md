@@ -6,8 +6,9 @@ anchora runs small workflows made of dependent agent calls. As user describe the
 
 Workflows can run in the request that started them, or they can be submitted as jobs backed by PostgreSQL and Redis
 and executed by a pool of workers that survives losing any of its nodes.
-Agents are the one abstraction that you deal with here : a small `Agent` interface in this repository, wired by the executable to an
-Eino chat model that speaks to any OpenAI-compatible provider.
+Agents are the one abstraction that you deal with here : a small `Agent` interface in this repository, wired by the executable over
+one HTTP call to a Python agent sidecar (`agent/`) that serves models from the Hugging Face ecosystem —
+[transformers](https://github.com/huggingface/transformers) loading any public checkpoint, e.g. Qwen/Qwen3-0.6B, locally and token-free.
 
 ## Architecture at a glance
 
@@ -24,7 +25,7 @@ flowchart TD
 
     Engine["Workflow engine<br/>DAG validation, ready-wave execution"]
     Agent["Agent interface<br/>Run(context, prompt) to output, error"]
-    Provider["Eino chat model<br/>OpenAI-compatible provider"]
+    Provider["Python agent sidecar<br/>FastAPI + Hugging Face transformers"]
 
     subgraph Async["Durable jobs, optional"]
         Queue[("Redis<br/>ready list + lease set")]
@@ -120,18 +121,20 @@ flowchart LR
     end
 
     Engine["Workflow engine<br/>validate DAG, render prompts, run ready steps"]
-    HF["Eino chat model adapter<br/>OpenAI-compatible provider"]
+    Adapter["remoteagent HTTP adapter<br/>POST /run, one JSON body"]
+    Sidecar["Python agent sidecar<br/>FastAPI + Hugging Face transformers"]
     DB[("PostgreSQL<br/>jobs, steps, events, workers<br/>owner + lease per job")]
     Ready[("Redis ready list")]
     Leases[("Redis lease set<br/>job to deadline + owner")]
     Worker["Worker<br/>claim, heartbeat, run"]
     Reaper["Reaper<br/>sweep expired leases"]
-    HFRouter["Provider endpoint<br/>router.huggingface.co by default"]
+    Hub["Hugging Face model hub<br/>Qwen/Qwen3-0.6B by default"]
 
     Client --> Sync
     Sync --> Engine
-    Engine --> HF
-    HF --> HFRouter
+    Engine --> Adapter
+    Adapter --> Sidecar
+    Sidecar -- weights --> Hub
     Client --> Submit
     Submit --> DB
     Submit --> Ready
@@ -155,33 +158,25 @@ lease period so the cheaper sweep goes first.
 
 ## Running it
 
-Requirements: Go 1.25 or newer, or just Docker if you would rather not build
-locally. Docker is otherwise only needed for the optional PostgreSQL and Redis
-services. Real requests also need an API token for the provider you point an
-agent at; Hugging Face's router is the default.
+Requirements: Go 1.25 or newer for the server, Python 3.13 for the agent
+sidecar (any `uv` or pip), and Docker for the optional PostgreSQL and Redis
+services. No API tokens: the sidecar serves a public Hugging Face checkpoint
+locally, so the first start downloads the weights (~1.5 GB for Qwen3-0.6B).
 
-The checked-in `config.yaml` starts the synchronous API and has no agents
-configured. Add at least one named agent before sending a workflow:
-
-```yaml
-agents:
-  research:
-    model_id: HuggingFaceTB/SmolLM3-3B:fastest
-    base_url: https://router.huggingface.co/v1
-    token_env: HF_TOKEN
-    instruction: You are a concise research assistant.
-    max_tokens: 1024
-    timeout_ms: 30000
-```
-
-`base_url` is optional and defaults to Hugging Face's router. Point it at any
-other OpenAI-compatible endpoint, with `token_env` naming that provider's key.
-
-Then set the token and start the server. `.env.example` lists every variable
-Anchora reads:
+Start the sidecar, which loads `Qwen/Qwen3-0.6B` into memory and listens on
+`:8000`:
 
 ```sh
-export HF_TOKEN=hf_replace_me
+cd agent
+uv venv && uv pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+The checked-in `config.yaml` starts the synchronous API and points one agent at
+that sidecar. Satisfy yourself that both are healthy, then start the server:
+
+```sh
+curl http://localhost:8000/healthz   # {"status":"ok"}
 go run ./cmd/anchora -config config.yaml
 ```
 
@@ -194,19 +189,33 @@ curl -X POST http://localhost:8080/v1/workflows/run \
   -d @examples/workflow.json
 ```
 
-`examples/workflow.json` holds the two-step workflow shown above.
+`examples/workflow.json` holds the two-step workflow shown above. A real run
+against local Qwen3-0.6B looks like this (trimmed):
+
+```json
+{
+  "steps": [
+    { "id": "research", "status": "succeeded",
+      "output": "The `select` statement in Go is used to choose one of multiple channels or goroutines to execute. It allows for selecting a target from a set of possible options, which is particularly useful in concurrent programming scenarios." },
+    { "id": "summary", "status": "succeeded",
+      "output": "The `select` statement in Go selects one of multiple channels or goroutines to execute." }
+  ]
+}
+```
 
 ### Durable jobs
 
-Set `async.enabled: true` and provide PostgreSQL and Redis URLs through the
-configured environment variables. The included services can be started with:
+Create a config with the job API enabled (the checked-in one must always load
+without services, so async stays off by default):
 
 ```sh
+cp config.yaml config.local.yaml   # gitignored
+# flip async.enabled to true in config.local.yaml, then:
+
 docker compose up -d --wait
 export DATABASE_URL='postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable'
 export REDIS_URL='redis://localhost:6379/0'
-export HF_TOKEN=hf_replace_me
-go run ./cmd/anchora -config config.yaml
+go run ./cmd/anchora -config config.local.yaml
 ```
 
 With async mode enabled, Anchora creates its tables on startup and starts the
@@ -275,22 +284,61 @@ non-root user:
 
 ```sh
 docker build -t anchora:local .
-docker run --rm -p 8080:8080 -e HF_TOKEN=hf_replace_me \
+docker run --rm -p 8080:8080 \
   -v "$PWD/config.yaml:/app/config.yaml:ro" anchora:local
 ```
 
 `config.yaml` is mounted rather than baked in, so a configuration change does
-not need a rebuild. To bring the whole stack up instead, use the compose `app`
-profile, which starts Anchora with PostgreSQL and Redis and points it at both:
+not need a rebuild. Point the agent at the sidecar container when Anchora runs
+in a container (`url: http://agent:8000`); the compose `app` profile builds and
+starts the sidecar alongside Anchora, PostgreSQL, and Redis, with the model
+cache kept in a named volume so restarts do not re-download weights:
 
 ```sh
 task app-up     # docker compose --profile app up -d --build --wait
 ```
 
-Set `async.enabled: true` in `config.yaml` first if you want the job API; the
-service picks up `HF_TOKEN` from a local `.env` if one exists. Without the
-profile, `docker compose up` still starts only PostgreSQL and Redis, which is
+Set `async.enabled: true` first via `config.local.yaml` (gitignored) and run
+with `-config config.local.yaml` for the job API. In the `app` profile the
+compose network renames to the service host, so point the agent at
+`http://agent:8000`: `docker compose --profile app up -d agent` brings just the
+sidecar up for a host-run Anchora, and `task app-up` runs the whole stack. The
+service picks up a local `.env` if one exists. Without the profile,
+`docker compose up` still starts only PostgreSQL and Redis, which is
 what the integration tests want.
+
+## Observability
+
+Anchora serves Prometheus-format metrics at `GET /metrics` (always available):
+responses by status, terminal step outcomes, workflow run results, jobs
+submitted and jobs that reached a terminal state, and the queue depth gauges a
+poller refreshes every 5 seconds when async mode is on. Logs go to stdout.
+
+The compose `telemetry` profile runs the collection stack:
+
+```sh
+task telemetry-up   # docker compose --profile telemetry up -d --wait
+```
+
+- **Prometheus** (`:9090`) scrapes the host-run server at
+  `host.docker.internal:8080`, so it works whether Anchora runs via docker or
+  `go run`.
+- **Grafana** (`:3000`, anonymous viewer) provisions the **Anchora** dashboard:
+  HTTP response rate by status, step outcomes, durable jobs submitted versus
+  terminals, workflow stats, queue depth with the worker roster, and a live log
+  panel.
+- **Loki** (`:3100`) stores logs. **Promtail** tails `./logs/*.log`, the
+  directory the server is expected to write to, so run it with
+  `./bin/anchora -config config.local.yaml > logs/anchora.log 2>&1`; the agent
+  sidecar can log into `logs/agent.log` the same way. Everything is scraped
+  under `job="anchora"`; filter by `filename` if you need one process.
+
+Metrics names are `anchora_*`: `anchora_http_responses_total{code}`,
+`anchora_steps_total{status}`, `anchora_workflows_total{result}`,
+`anchora_jobs_submitted_total`, `anchora_jobs_total{status}`,
+`anchora_queue_ready`, `anchora_jobs_in_flight`, and `anchora_workers`.
+Prometheus may need a first successful scrape before the dashboard shows data;
+send one request through the API to see every series.
 
 ## HTTP API
 
@@ -300,6 +348,7 @@ limited to 1 MiB and unknown JSON fields are rejected.
 | Method | Path | Available | Response |
 | --- | --- | --- | --- |
 | GET | `/healthz` | Always | `200` and `{"status":"ok"}` |
+| GET | `/metrics` | Always | Prometheus text format |
 | POST | `/v1/workflows/run` | Always | `200` with step results; `502` when a workflow step fails; `400` for invalid input; `500` for other errors |
 | POST | `/v1/jobs` | Async mode | `202` with the created job; `400` for invalid input |
 | GET | `/v1/jobs/{id}` | Async mode | `200` with the job, `404` if it does not exist, or `500` on a store error |
@@ -318,14 +367,19 @@ type Agent interface {
 }
 ```
 
-The executable wires named agents to an [Eino](https://github.com/cloudwego/eino)
-OpenAI-compatible chat model. `base_url` defaults to Hugging Face's Inference
-Providers router (`https://router.huggingface.co/v1`), so requests land on
-`/chat/completions` there unless configured otherwise. Each generation sends the
-configured system instruction, when present, followed by the rendered prompt as
-a user message, and fails if the model returns no text. `model_id`,
-`max_tokens`, `timeout_ms`, and the bearer token come from configuration and
-the named environment variable.
+The executable wires named agents over HTTP to the Python agent sidecar. The
+sidecar's `POST /run` takes `{"prompt", "instruction"}`, applies the chat
+template with a Hugging Face transformers model, and returns `{"output"}`; an
+empty completion, an HTTP error, or an unreachable service is a step failure,
+which is what workflow retries are driven by. The `remoteagent` adapter
+(`lib/remoteagent/agent.go`) does the client side: it validates the configured
+URL at startup, sets the configured timeout, and reads error bodies up to 1 MiB.
+
+Which model is served is the sidecar's own setting: `MODEL_NAME`
+(`Qwen/Qwen3-0.6B` by default) and `MAX_NEW_TOKENS`, set in the compose service
+or the environment. Adding an agent for a different routing target is
+configuration, not code: another entry under `agents:` pointing at another
+instance of the sidecar.
 
 ## Configuration
 
@@ -348,16 +402,18 @@ async:
   worker_ttl_ms: 0
   reclaim_batch: 100
   reaper: true
-agents: {}
+agents:
+  research:
+    url: http://localhost:8000
+    instruction: You are a concise research assistant.
+    timeout_ms: 60000
 ```
 
 `server.address` defaults to `:8080`. Retry values, worker counts, and agent
-`max_tokens`/`timeout_ms` must be non-negative. Every agent needs a `model_id`.
-`token_env` defaults to `HF_TOKEN` and `base_url` to
-`https://router.huggingface.co/v1`; database and Redis environment-variable
-names default to `DATABASE_URL` and `REDIS_URL`. An agent's `timeout_ms` of zero
-leaves the model's HTTP client without a timeout, and `max_tokens` of zero omits
-that field from the provider request.
+`timeout_ms` must be non-negative. Every agent needs a `url` reachable at
+startup. Database and Redis environment-variable names default to `DATABASE_URL`
+and `REDIS_URL`. An agent's `timeout_ms` of zero leaves the HTTP client without
+a timeout.
 
 The distributed settings tune recovery:
 
@@ -389,6 +445,8 @@ task tidy
 task image         # docker build -t anchora:local .
 task app-up        # docker compose --profile app up -d --build --wait
 task app-down
+task telemetry-up  # docker compose --profile telemetry up -d --wait
+task telemetry-down
 task services-up   # docker compose up -d --wait (PostgreSQL and Redis only)
 task services-down
 task services-logs
@@ -396,7 +454,7 @@ task services-logs
 
 Unit tests cover the workflow engine (DAG validation, concurrent waves,
 retries, skip cascades, and resume), every HTTP route including the SSE stream,
-the Eino model adapter, and configuration. They live in `tests/`, a single
+the agent-service adapter, and configuration. They live in `tests/`, a single
 black-box package, and run against in-memory fakes, so they need no services.
 
 The Lua scripts and SQL in `lib/jobs/store.go` and `lib/jobs/queue.go`

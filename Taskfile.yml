@@ -75,6 +75,16 @@ tasks:
     cmds:
       - docker compose --profile app down
 
+  telemetry-up:
+    desc: Start Prometheus, Grafana, Loki, and Promtail (services included)
+    cmds:
+      - docker compose --profile telemetry up -d --wait
+
+  telemetry-down:
+    desc: Stop the observability stack
+    cmds:
+      - docker compose --profile app --profile telemetry down --remove-orphans
+
   services-up:
     desc: Start the PostgreSQL and Redis dependencies for async jobs
     cmds:

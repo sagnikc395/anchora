@@ -1,0 +1,12 @@
+# Scrapes the host-run Anchora binary (host.docker.internal) and itself.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: anchora
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

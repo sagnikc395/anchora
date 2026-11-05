@@ -78,19 +78,14 @@ type Async struct {
 	Reaper *bool `yaml:"reaper"`
 }
 
-// Agent configures one named OpenAI-compatible chat model.
+// Agent points at one agent service that provides named model calls.
 type Agent struct {
-	// ModelID is the provider's model name. It is required.
-	ModelID string `yaml:"model_id"`
-	// BaseURL is the OpenAI-compatible endpoint. Zero uses Hugging Face's
-	// Inference Providers router.
-	BaseURL string `yaml:"base_url"`
-	// TokenEnv names the variable holding the bearer token, default HF_TOKEN.
-	TokenEnv string `yaml:"token_env"`
-	// Instruction is sent as a system message before each prompt.
+	// URL is the base URL of the agent service, e.g. http://localhost:8000.
+	// It is required.
+	URL string `yaml:"url"`
+	// Instruction is sent with each prompt; the agent service applies it to
+	// the chat template.
 	Instruction string `yaml:"instruction"`
-	// MaxTokens caps the response length. Zero omits the field entirely.
-	MaxTokens int `yaml:"max_tokens"`
 	// TimeoutMS bounds a single generation. Zero leaves the client unbounded.
 	TimeoutMS int `yaml:"timeout_ms"`
 }
@@ -124,11 +119,11 @@ func (c Config) validate() error {
 		return err
 	}
 	for name, agent := range c.Agents {
-		if name == "" || agent.ModelID == "" {
-			return errors.New("agents must have a name and model_id")
+		if name == "" || agent.URL == "" {
+			return errors.New("agents must have a name and url")
 		}
-		if agent.MaxTokens < 0 || agent.TimeoutMS < 0 {
-			return fmt.Errorf("agent %q values must be non-negative", name)
+		if agent.TimeoutMS < 0 {
+			return fmt.Errorf("agent %q: timeout_ms must be non-negative", name)
 		}
 	}
 	return nil

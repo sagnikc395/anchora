@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sagnikc395/anchora/lib/metrics"
 	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
@@ -248,6 +249,7 @@ func (s *Service) Submit(ctx context.Context, steps []Step) (*Job, error) {
 		_, _ = s.Store.FinishJob(ctx, id, "", workflow.Failed, "enqueue failed: "+err.Error())
 		return nil, fmt.Errorf("enqueue job: %w", err)
 	}
+	metrics.AddJobSubmitted()
 	return job, nil
 }
 
@@ -451,6 +453,7 @@ func (s *Service) process(ctx context.Context, workerID, id string) {
 		return
 	}
 	_ = s.Store.AppendEvent(final, id, EventCompleted, map[string]any{"status": status, "results": results, "worker": workerID, "attempt": attempts})
+	metrics.AddJob(string(status))
 	s.ack(final, id)
 }
 
@@ -569,6 +572,7 @@ func (s *Service) deadLetter(ctx context.Context, workerID, id string, attempts,
 	if _, err := s.Store.FinishJob(ctx, id, workerID, workflow.Failed, reason); err != nil {
 		s.logf("worker %s: dead-letter job %s: %v", workerID, id, err)
 	}
+	metrics.AddJob(string(workflow.Failed))
 	_ = s.Store.AppendEvent(ctx, id, EventDeadLettered, map[string]any{"attempts": attempts, "max_attempts": limit, "worker": workerID})
 }
 

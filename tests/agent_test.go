@@ -2,128 +2,79 @@ package tests
 
 import (
 	"context"
-	"io"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/sagnikc395/anchora/lib/einoagent"
+	"github.com/sagnikc395/anchora/lib/remoteagent"
 )
 
-// defaultBaseURL pins the router base the adapter falls back to, so a silent
-// change of endpoint fails loudly here.
-const defaultBaseURL = "https://router.huggingface.co/v1"
-
-type roundTripper func(*http.Request) (*http.Response, error)
-
-func (f roundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
-
-// respondWith builds a client whose transport always returns body, so the
-// adapter's handling of a completion can be checked without a provider.
-func respondWith(body string) *http.Client {
-	return &http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Header:     make(http.Header),
-		}, nil
-	})}
-}
-
-func TestRunUsesEinoOpenAICompatibleModel(t *testing.T) {
-	t.Setenv("TEST_HF_TOKEN", "secret")
-	client := &http.Client{Transport: roundTripper(func(req *http.Request) (*http.Response, error) {
-		if req.URL.String() != defaultBaseURL+"/chat/completions" {
-			t.Fatalf("URL = %q", req.URL)
-		}
-		if got := req.Header.Get("Authorization"); got != "Bearer secret" {
-			t.Fatalf("Authorization = %q", got)
-		}
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := string(body)
-		for _, want := range []string{`"model":"HuggingFaceTB/SmolLM3-3B:fastest"`, `"role":"system"`, `"content":"Be concise."`, `"role":"user"`, `"content":"Hello"`, `"max_tokens":64`} {
-			if !strings.Contains(got, want) {
-				t.Fatalf("request body %s does not contain %s", got, want)
-			}
-		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"Hi"}}]}`)), Header: make(http.Header)}, nil
-	})}
-	agent, err := einoagent.New(context.Background(), einoagent.Config{Name: "assistant", ModelID: "HuggingFaceTB/SmolLM3-3B:fastest", TokenEnv: "TEST_HF_TOKEN", Instruction: "Be concise.", MaxTokens: 64, HTTPClient: client})
+func newTestAgent(t *testing.T, handler http.HandlerFunc) *remoteagent.Agent {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	agent, err := remoteagent.New(remoteagent.Config{Name: "test", URL: server.URL, Instruction: "be terse"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := agent.Run(context.Background(), "Hello")
-	if err != nil || output != "Hi" {
-		t.Fatalf("Run() = %q, %v", output, err)
+	return agent
+}
+
+func TestAgentSendsPromptAndReturnsOutput(t *testing.T) {
+	agent := newTestAgent(t, func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Prompt      string `json:"prompt"`
+			Instruction string `json:"instruction"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if request.Prompt != "hello" || request.Instruction != "be terse" {
+			t.Errorf("request = %+v, want the prompt and instruction", request)
+		}
+		_, _ = w.Write([]byte(`{"output":"done: hello"}`))
+	})
+	output, err := agent.Run(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "done: hello" {
+		t.Errorf("output = %q, want %q", output, "done: hello")
 	}
 }
 
-func TestNewRejectsIncompleteConfig(t *testing.T) {
-	t.Setenv("TEST_HF_TOKEN", "secret")
-	tests := map[string]einoagent.Config{
-		"no name":     {ModelID: "m", TokenEnv: "TEST_HF_TOKEN"},
-		"no model ID": {Name: "a", TokenEnv: "TEST_HF_TOKEN"},
-	}
-	for name, config := range tests {
-		t.Run(name, func(t *testing.T) {
-			if _, err := einoagent.New(context.Background(), config); err == nil {
-				t.Fatal("expected a validation error")
-			}
-		})
+func TestAgentSurfacesServiceErrors(t *testing.T) {
+	agent := newTestAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"detail":"model returned no text"}`))
+	})
+	_, err := agent.Run(context.Background(), "hello")
+	if err == nil || !strings.Contains(err.Error(), "model returned no text") {
+		t.Fatalf("err = %v, want the service's detail", err)
 	}
 }
 
-// A missing token must fail at construction, so a misconfigured agent is
-// caught at startup rather than on the first workflow step.
-func TestNewRequiresTheConfiguredToken(t *testing.T) {
-	t.Setenv("TEST_HF_TOKEN", "")
-	_, err := einoagent.New(context.Background(), einoagent.Config{Name: "a", ModelID: "m", TokenEnv: "TEST_HF_TOKEN"})
-	if err == nil {
-		t.Fatal("expected an error when the token variable is unset")
-	}
-	if !strings.Contains(err.Error(), "TEST_HF_TOKEN") {
-		t.Fatalf("error = %v, want it to name the missing variable", err)
+func TestAgentRejectsEmptyOutput(t *testing.T) {
+	agent := newTestAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"output":""}`))
+	})
+	if _, err := agent.Run(context.Background(), "hello"); err == nil {
+		t.Fatal("expected an error for an empty completion")
 	}
 }
 
-func TestNewDefaultsToHuggingFaceToken(t *testing.T) {
-	t.Setenv("HF_TOKEN", "secret")
-	if _, err := einoagent.New(context.Background(), einoagent.Config{Name: "a", ModelID: "m"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestAgentNewRejectsInvalidConfig(t *testing.T) {
+	if _, err := remoteagent.New(remoteagent.Config{URL: "http://localhost:8000"}); err == nil {
+		t.Fatal("expected an error for a missing name")
 	}
-}
-
-// A completion with no text cannot be passed to a downstream step, so it is an
-// error rather than an empty success.
-func TestRunRejectsEmptyCompletion(t *testing.T) {
-	t.Setenv("TEST_HF_TOKEN", "secret")
-	for name, body := range map[string]string{
-		"empty content":      `{"choices":[{"message":{"role":"assistant","content":""}}]}`,
-		"whitespace content": `{"choices":[{"message":{"role":"assistant","content":"  \n "}}]}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			agent, err := einoagent.New(context.Background(), einoagent.Config{
-				Name: "a", ModelID: "m", TokenEnv: "TEST_HF_TOKEN", HTTPClient: respondWith(body),
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := agent.Run(context.Background(), "Hello"); err == nil {
-				t.Fatal("expected an error for a completion with no text")
-			}
-		})
+	if _, err := remoteagent.New(remoteagent.Config{Name: "research"}); err == nil {
+		t.Fatal("expected an error for a missing URL")
 	}
-}
-
-func TestRunOnUninitializedAgent(t *testing.T) {
-	var agent *einoagent.Agent
-	if _, err := agent.Run(context.Background(), "Hello"); err == nil {
-		t.Fatal("expected an error from a nil agent")
-	}
-	if _, err := (&einoagent.Agent{}).Run(context.Background(), "Hello"); err == nil {
-		t.Fatal("expected an error from an agent with no model")
+	if _, err := remoteagent.New(remoteagent.Config{Name: "research", URL: "localhost:8000"}); err == nil {
+		t.Fatal("expected an error for a URL with no scheme")
 	}
 }

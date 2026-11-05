@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/sagnikc395/anchora/lib/jobs"
+	"github.com/sagnikc395/anchora/lib/metrics"
 	"github.com/sagnikc395/anchora/lib/workflow"
 )
 
@@ -62,6 +63,7 @@ func NewRouterWithJobs(agents AgentResolver, options Options, service *jobs.Serv
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	r.Get("/metrics", metrics.Handler)
 	r.Post("/v1/workflows/run", runHandler(agents, options))
 	if service != nil {
 		r.Post("/v1/jobs", submitJobHandler(service))
@@ -125,6 +127,14 @@ func runHandler(agents AgentResolver, options Options) http.HandlerFunc {
 			return
 		}
 		results, err := wf.Run(r.Context())
+		runStatus := "succeeded"
+		if err != nil {
+			runStatus = "failed"
+		}
+		for _, result := range results {
+			metrics.AddStep(string(result.Status))
+		}
+		metrics.AddWorkflow(runStatus)
 		if err != nil {
 			var workflowErr *workflow.WorkflowError
 			if errors.As(err, &workflowErr) {
@@ -253,6 +263,7 @@ func writeError(w http.ResponseWriter, status int, message string) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
+	metrics.AddHTTP(status)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)

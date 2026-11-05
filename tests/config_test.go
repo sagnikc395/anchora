@@ -82,9 +82,8 @@ async:
   workers: 8
 agents:
   research:
-    model_id: some/model
-    timeout_ms: 15000
-`))
+    url: http://localhost:8000
+    timeout_ms: 15000`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,9 +149,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"negative worker_ttl_ms":  "async:\n  worker_ttl_ms: -1\n",
 		"negative max_attempts":   "async:\n  max_attempts: -1\n",
 		"negative reclaim_batch":  "async:\n  reclaim_batch: -1\n",
-		"agent without model_id":  "agents:\n  research: {}\n",
-		"negative max_tokens":     "agents:\n  research:\n    model_id: m\n    max_tokens: -1\n",
-		"negative timeout_ms":     "agents:\n  research:\n    model_id: m\n    timeout_ms: -1\n",
+		"agent without url":       "agents:\n  research: {}\n",
+		"negative timeout_ms":     "agents:\n  research:\n    url: http://localhost:8000\n    timeout_ms: -1\n",
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {
