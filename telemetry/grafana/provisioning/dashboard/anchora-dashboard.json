@@ -92,7 +92,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum (increase(anchora_jobs_total{status=\"failed\"}[1h]))",
+          "expr": "sum (increase(anchora_jobs_total{status=\"failed\"}[1h])) or vector(0)",
           "legendFormat": "failed jobs"
         }
       ],
