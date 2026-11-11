@@ -1,0 +1,21 @@
+{
+  "steps": [
+    {
+      "id": "prepare",
+      "agent": "research",
+      "prompt": "State in one sentence what a dead-letter queue is."
+    },
+    {
+      "id": "enrich",
+      "agent": "unreachable",
+      "depends_on": ["prepare"],
+      "prompt": "This step calls an agent service that is not listening, so it exhausts its retries and fails:\n{{steps.prepare.output}}"
+    },
+    {
+      "id": "publish",
+      "agent": "summarizer",
+      "depends_on": ["enrich"],
+      "prompt": "This step is never attempted; it is skipped once its dependency fails:\n{{steps.enrich.output}}"
+    }
+  ]
+}

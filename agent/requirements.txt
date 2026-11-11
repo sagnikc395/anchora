@@ -4,3 +4,6 @@ uvicorn==0.54.0
 transformers==5.22.1
 accelerate==1.15.0
 torch==2.15.0
+# Apple Silicon runtime: continuous batching on the GPU through Metal. Only
+# installable on macOS/arm64, where it is also the backend chosen by default.
+mlx-lm==0.32.2; sys_platform == "darwin" and platform_machine == "arm64"

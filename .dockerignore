@@ -1,5 +1,8 @@
 .git
 .github
+.venv
+agent/.venv
+agent/__pycache__
 bin/
 *.test
 coverage.out

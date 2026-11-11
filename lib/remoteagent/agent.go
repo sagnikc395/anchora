@@ -16,6 +16,15 @@ import (
 	"time"
 )
 
+const (
+	// maxIdleConnsPerHost is sized for the widest fan-out a single workflow
+	// is likely to produce, so steps in one wave share warm connections.
+	maxIdleConnsPerHost = 64
+	// idleConnTimeout is long enough that a connection survives the pause
+	// between two waves of the same job.
+	idleConnTimeout = 90 * time.Second
+)
+
 // Config configures a workflow.Agent backed by the agent service.
 type Config struct {
 	// Name identifies the agent in error messages. It is required.
@@ -45,7 +54,15 @@ func New(config Config) (*Agent, error) {
 	if !strings.HasPrefix(config.URL, "http://") && !strings.HasPrefix(config.URL, "https://") {
 		return nil, fmt.Errorf("agent %q URL %q must start with http:// or https://", config.Name, config.URL)
 	}
-	client := &http.Client{}
+	// Every step of a workflow hits the same sidecar, and a fan-out starts
+	// many at once. The default transport keeps two idle connections per
+	// host, so a wide wave would open and close a TCP connection per step;
+	// keeping a pool the size of a large wave lets them all be reused.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConnsPerHost = maxIdleConnsPerHost
+	transport.MaxIdleConns = maxIdleConnsPerHost
+	transport.IdleConnTimeout = idleConnTimeout
+	client := &http.Client{Transport: transport}
 	if config.Timeout > 0 {
 		client.Timeout = config.Timeout
 	}

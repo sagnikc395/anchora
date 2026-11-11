@@ -2,8 +2,9 @@
 //
 // A workflow is a set of [Step] values whose DependsOn edges form a DAG.
 // [NewWorkflow] validates the graph up front; [Workflow.Run] then executes
-// every wave of dependency-ready steps concurrently, making each step's output
-// available to its downstream steps.
+// steps as a dataflow: every step starts the moment its dependencies have
+// succeeded, concurrently with whatever else is running, and its output is
+// made available to its downstream steps.
 package workflow
 
 import (
@@ -120,7 +121,7 @@ func NewWorkflow(steps []Step, options Options) (*Workflow, error) {
 	return &Workflow{steps: append([]Step(nil), steps...), options: options}, nil
 }
 
-// Run executes dependency-ready steps concurrently, one wave at a time, and
+// Run executes the steps concurrently as their dependencies complete and
 // returns a result for every step in declaration order. A step whose
 // dependencies did not all succeed is skipped rather than run.
 //
@@ -142,33 +143,31 @@ func (w *Workflow) Run(ctx context.Context) ([]StepResult, error) {
 		results[prior.ID] = prior
 		delete(remaining, prior.ID)
 	}
-	for len(remaining) > 0 {
-		ready := readyWave(remaining, results)
-		if len(ready) == 0 {
+	// Dataflow scheduling: a step starts as soon as its own dependencies have
+	// succeeded, not when the whole wave it was part of has drained. Only this
+	// goroutine reads or writes results; a step's prompt is rendered here
+	// before its goroutine starts, and its outcome is recorded here when it
+	// comes back, so no agent goroutine ever touches shared state.
+	completed := make(chan StepResult, len(w.steps))
+	inFlight := 0
+	for {
+		for _, step := range readyWave(remaining, results) {
+			prompt, err := renderPrompt(step.Prompt, results)
+			if err != nil {
+				completed <- StepResult{ID: step.ID, Status: Failed, Error: err.Error()}
+			} else {
+				go func() { completed <- w.runStep(ctx, step.ID, step.Agent, prompt) }()
+			}
+			inFlight++
+		}
+		if inFlight == 0 {
 			break
 		}
-		// Every prompt in the wave is rendered before any step starts, so no
-		// goroutine reads results while the drain loop below writes to it.
-		prompts := make([]string, len(ready))
-		renderErrs := make([]error, len(ready))
-		for i, step := range ready {
-			prompts[i], renderErrs[i] = renderPrompt(step.Prompt, results)
-		}
-		completed := make(chan StepResult, len(ready))
-		for i, step := range ready {
-			if err := renderErrs[i]; err != nil {
-				completed <- StepResult{ID: step.ID, Status: Failed, Error: err.Error()}
-				continue
-			}
-			prompt := prompts[i]
-			go func() { completed <- w.runStep(ctx, step.ID, step.Agent, prompt) }()
-		}
-		for range ready {
-			result := <-completed
-			results[result.ID] = result
-			if w.options.OnStepState != nil {
-				w.options.OnStepState(result)
-			}
+		result := <-completed
+		inFlight--
+		results[result.ID] = result
+		if w.options.OnStepState != nil {
+			w.options.OnStepState(result)
 		}
 		skipBlocked(remaining, results)
 	}
@@ -191,7 +190,8 @@ func (w *Workflow) Run(ctx context.Context) ([]StepResult, error) {
 }
 
 // readyWave removes every step whose dependencies have all succeeded from
-// remaining and returns them in ID order, so a run is deterministic.
+// remaining and returns them in ID order, so steps start in a deterministic
+// order even though they finish in whatever order their agents answer.
 func readyWave(remaining map[string]Step, results map[string]StepResult) []Step {
 	var ready []Step
 	for id, step := range remaining {

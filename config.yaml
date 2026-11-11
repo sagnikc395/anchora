@@ -32,13 +32,32 @@ async:
   # sweeps are atomic. Set false only if you run a dedicated reaper process.
   reaper: true
 
-# Named agents point at the Python agent service (agent/main.py), which serves
-# a Hugging Face transformers model such as Qwen/Qwen3-0.6B and applies the
-# instruction to the chat template. `ollama`/OpenAI providers are no longer
-# involved. The service listens on :8000; rerun it with MODEL_NAME to serve a
-# different model.
+# Named agents point at the Python agent sidecar (agent/main.py), which serves
+# a Qwen3 checkpoint — MLX on Apple Silicon, transformers elsewhere — and
+# applies the instruction to the chat template. The sidecar listens on :8000;
+# which model it serves is its own MODEL_NAME setting (docs/models.md), so the
+# same agents work unchanged from Qwen3-0.6B up to Qwen3-32B.
+#
+# timeout_ms is per attempt and must cover a cold request to the model you
+# serve: MAX_NEW_TOKENS divided by the model's decode rate, plus prefill. The
+# 120 s below covers 256 tokens at the 8B–14B sizes on an M4; raise it for
+# 32B or for larger MAX_NEW_TOKENS (docs/performance.md has the numbers).
 agents:
   research:
     url: http://localhost:8000
     instruction: You are a concise research assistant.
     timeout_ms: 120000
+  reviewer:
+    url: http://localhost:8000
+    instruction: You are a terse critic. Answer in one sentence, no preamble.
+    timeout_ms: 120000
+  summarizer:
+    url: http://localhost:8000
+    instruction: You compress text into a single sentence and nothing else.
+    timeout_ms: 120000
+  # Points at a port nothing listens on, so every call fails immediately. The
+  # examples use it to exercise retries, failed steps, the skip cascade, and
+  # dead-lettering without having to break the real sidecar.
+  unreachable:
+    url: http://127.0.0.1:9
+    timeout_ms: 2000

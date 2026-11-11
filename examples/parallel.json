@@ -1,0 +1,8 @@
+{
+  "steps": [
+    {"id": "goroutine", "agent": "research", "prompt": "Define a goroutine in one sentence."},
+    {"id": "channel", "agent": "research", "prompt": "Define a Go channel in one sentence."},
+    {"id": "mutex", "agent": "research", "prompt": "Define a mutex in one sentence."},
+    {"id": "context", "agent": "research", "prompt": "Define Go's context.Context in one sentence."}
+  ]
+}

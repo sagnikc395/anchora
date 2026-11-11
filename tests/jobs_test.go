@@ -20,12 +20,13 @@ import (
 // HTTP handlers: the worker lifecycle is covered by the jobs package's own
 // tests, so everything the handlers never reach is a no-op.
 type stubStore struct {
-	mu      sync.Mutex
-	jobs    map[string]*jobs.Job
-	events  map[string][]jobs.Event
-	nextID  int64
-	workers []jobs.WorkerInfo
-	failGet error
+	mu         sync.Mutex
+	jobs       map[string]*jobs.Job
+	events     map[string][]jobs.Event
+	nextID     int64
+	workers    []jobs.WorkerInfo
+	failGet    error
+	failCreate error
 }
 
 func newStubStore() *stubStore {
@@ -35,6 +36,9 @@ func newStubStore() *stubStore {
 func (s *stubStore) Create(_ context.Context, job *jobs.Job) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failCreate != nil {
+		return s.failCreate
+	}
 	copied := *job
 	s.jobs[job.ID] = &copied
 	return nil
@@ -187,6 +191,17 @@ func TestSubmitJobRejectsInvalidWorkflows(t *testing.T) {
 				t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
 			}
 		})
+	}
+}
+
+// The handler distinguishes the caller's mistakes (400) from a failing
+// backend, which is a server-side condition (500).
+func TestSubmitJobReportsStoreFailures(t *testing.T) {
+	handler, store, _ := newJobRouter(t)
+	store.failCreate = errors.New("database is down")
+	recorder := post(t, handler, "/v1/jobs", `{"steps":[{"id":"a","agent":"research","prompt":"hello"}]}`)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", recorder.Code, recorder.Body.String())
 	}
 }
 

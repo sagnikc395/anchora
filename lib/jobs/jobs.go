@@ -48,6 +48,10 @@ const (
 // was still running. The worker abandons the job; it does not fail it.
 var ErrLeaseLost = errors.New("job lease lost")
 
+// ErrInvalidWorkflow marks a submission the engine rejected before storing it,
+// so the HTTP layer can report the caller's own mistake, not a backend fault.
+var ErrInvalidWorkflow = errors.New("invalid workflow")
+
 // The event types appended to a job's event log, in the order a successful job
 // normally produces them.
 const (
@@ -207,6 +211,15 @@ func (c Config) workerTTL() time.Duration {
 	return c.WorkerTTL
 }
 
+// queueName applies the same default the queue itself uses, so a roster entry
+// names the queue its worker is really draining rather than an empty string.
+func (c Config) queueName() string {
+	if c.QueueName == "" {
+		return defaultQueueName
+	}
+	return c.QueueName
+}
+
 func (c Config) reclaimBatch() int {
 	if c.ReclaimBatch <= 0 {
 		return defaultReclaimBatch
@@ -224,10 +237,10 @@ func (s *Service) logf(format string, args ...any) {
 func (s *Service) Submit(ctx context.Context, steps []Step) (*Job, error) {
 	workflowSteps, err := s.resolveSteps(steps)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidWorkflow, err)
 	}
 	if _, err := workflow.NewWorkflow(workflowSteps, s.Options); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrInvalidWorkflow, err)
 	}
 	id, err := NewID()
 	if err != nil {
@@ -277,7 +290,7 @@ func (s *Service) Stats(ctx context.Context) (Stats, error) {
 // RunWorker claims and executes jobs until ctx is cancelled. workerID must be
 // unique across the cluster; use NewWorkerID to generate one.
 func (s *Service) RunWorker(ctx context.Context, workerID string) error {
-	info := WorkerInfo{ID: workerID, PID: os.Getpid(), Queue: s.Config.QueueName}
+	info := WorkerInfo{ID: workerID, PID: os.Getpid(), Queue: s.Config.queueName()}
 	info.Hostname, _ = os.Hostname()
 	if err := s.Store.RegisterWorker(ctx, info); err != nil {
 		return fmt.Errorf("register worker: %w", err)

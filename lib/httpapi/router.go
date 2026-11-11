@@ -162,7 +162,11 @@ func submitJobHandler(service *jobs.Service) http.HandlerFunc {
 		}
 		job, err := service.Submit(r.Context(), steps)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			if errors.Is(err, jobs.ErrInvalidWorkflow) {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusAccepted, job)

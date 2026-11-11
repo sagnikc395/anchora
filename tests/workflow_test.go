@@ -239,3 +239,42 @@ func TestNewWorkflowRejectsNegativeRetrySettings(t *testing.T) {
 type agentFunc func(context.Context, string) (string, error)
 
 func (f agentFunc) Run(ctx context.Context, prompt string) (string, error) { return f(ctx, prompt) }
+
+// Scheduling is dataflow, not wave-by-wave: a step whose own dependency has
+// finished starts even while an unrelated step from the same initial wave is
+// still running.
+func TestWorkflowStartsStepsAsDependenciesComplete(t *testing.T) {
+	slowDone := make(chan struct{})
+	downstreamStarted := make(chan struct{})
+	slow := agentFunc(func(ctx context.Context, prompt string) (string, error) {
+		select {
+		case <-downstreamStarted:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(2 * time.Second):
+			return "", errors.New("downstream step never started while the slow sibling ran")
+		}
+		close(slowDone)
+		return prompt, nil
+	})
+	downstream := agentFunc(func(_ context.Context, prompt string) (string, error) {
+		close(downstreamStarted)
+		<-slowDone
+		return prompt, nil
+	})
+	w, err := workflow.NewWorkflow([]workflow.Step{
+		{ID: "slow", Agent: slow, Prompt: "S"},
+		{ID: "fast", Agent: echoAgent{}, Prompt: "F"},
+		{ID: "after-fast", Agent: downstream, Prompt: "{{steps.fast.output}}!", DependsOn: []string{"fast"}},
+	}, workflow.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := w.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[2].Output != "F!" {
+		t.Fatalf("after-fast output = %q, want %q", results[2].Output, "F!")
+	}
+}

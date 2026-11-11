@@ -1,0 +1,22 @@
+{
+  "steps": [
+    {"id": "postgres", "agent": "research", "prompt": "Name one thing PostgreSQL is good at, in five words."},
+    {"id": "redis", "agent": "research", "prompt": "Name one thing Redis is good at, in five words."},
+    {"id": "kafka", "agent": "research", "prompt": "Name one thing Kafka is good at, in five words."},
+    {"id": "sqlite", "agent": "research", "prompt": "Name one thing SQLite is good at, in five words."},
+    {"id": "s3", "agent": "research", "prompt": "Name one thing object storage is good at, in five words."},
+    {"id": "etcd", "agent": "research", "prompt": "Name one thing etcd is good at, in five words."},
+    {
+      "id": "shortlist",
+      "agent": "reviewer",
+      "depends_on": ["postgres", "redis", "kafka", "sqlite", "s3", "etcd"],
+      "prompt": "Pick the two best fits for a durable job queue, one sentence:\n{{steps.postgres.output}}\n{{steps.redis.output}}\n{{steps.kafka.output}}\n{{steps.sqlite.output}}\n{{steps.s3.output}}\n{{steps.etcd.output}}"
+    },
+    {
+      "id": "verdict",
+      "agent": "summarizer",
+      "depends_on": ["shortlist"],
+      "prompt": "Compress to one sentence:\n{{steps.shortlist.output}}"
+    }
+  ]
+}

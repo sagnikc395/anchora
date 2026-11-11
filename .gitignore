@@ -15,7 +15,11 @@ coverage.html
 .env
 !.env.example
 config.local.yaml
+.venv/
 agent/.venv/
+
+# Python bytecode
+__pycache__/
 
 # Editor and OS cruft
 .DS_Store

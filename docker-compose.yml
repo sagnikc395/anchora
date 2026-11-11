@@ -23,19 +23,35 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # The Python agent sidecar (agent/main.py): a Hugging Face transformers
-  # model served over POST /run. Anchora's agent entries point at it —
-  # http://agent:8000 from the anchora container, http://localhost:8000 from
-  # the host (port mapped). The model cache volume keeps the weight download
-  # on restarts.
+  # The Python agent sidecar (agent/main.py): a Qwen checkpoint served over
+  # POST /run. Anchora's agent entries point at it — http://agent:8000 from
+  # the anchora container, http://localhost:8000 from the host (port mapped).
+  # The model cache volume keeps the weight download on restarts.
+  #
+  # Inside a Linux container the sidecar runs the transformers backend on the
+  # CPU, or on a GPU if the host passes one through (uncomment `deploy`). It
+  # cannot reach Apple Silicon's GPU from a container, so on a Mac run the
+  # sidecar natively instead (`task agent-run`), where MLX serves the larger
+  # models. See docs/performance.md.
   agent:
     profiles: ["app"]
     build: ./agent
     ports:
       - "8000:8000"
     environment:
-      MODEL_NAME: Qwen/Qwen3-0.6B
-      MAX_NEW_TOKENS: "256"
+      MODEL_NAME: ${MODEL_NAME:-Qwen/Qwen3-0.6B}
+      BACKEND: transformers
+      MAX_NEW_TOKENS: ${MAX_NEW_TOKENS:-256}
+      BATCH_SIZE: ${BATCH_SIZE:-16}
+      BATCH_WINDOW_MS: "10"
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-8}
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     volumes:
       - agent-cache:/root/.cache/huggingface
     healthcheck:

@@ -1,0 +1,16 @@
+{
+  "steps": [
+    {
+      "id": "first",
+      "agent": "research",
+      "depends_on": ["second"],
+      "prompt": "This workflow never runs: its two steps depend on each other."
+    },
+    {
+      "id": "second",
+      "agent": "research",
+      "depends_on": ["first"],
+      "prompt": "NewWorkflow rejects the cycle up front, so the API answers 400."
+    }
+  ]
+}

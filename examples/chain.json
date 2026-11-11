@@ -1,0 +1,27 @@
+{
+  "steps": [
+    {
+      "id": "outline",
+      "agent": "research",
+      "prompt": "List three bullet points on why message queues decouple services."
+    },
+    {
+      "id": "draft",
+      "agent": "research",
+      "depends_on": ["outline"],
+      "prompt": "Turn these bullets into one short paragraph:\n{{steps.outline.output}}"
+    },
+    {
+      "id": "critique",
+      "agent": "reviewer",
+      "depends_on": ["draft"],
+      "prompt": "Name the single weakest claim in this paragraph, in one sentence:\n{{steps.draft.output}}"
+    },
+    {
+      "id": "summary",
+      "agent": "summarizer",
+      "depends_on": ["draft", "critique"],
+      "prompt": "Compress the paragraph into one sentence, fixing the noted weakness.\nParagraph: {{steps.draft.output}}\nWeakness: {{steps.critique.output}}"
+    }
+  ]
+}

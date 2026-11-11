@@ -75,6 +75,28 @@ tasks:
     cmds:
       - docker compose --profile app down
 
+  agent-run:
+    desc: Start the agent sidecar natively (MODEL=… BACKEND=… MAX_NEW_TOKENS=… override the defaults)
+    dir: agent
+    env:
+      MODEL_NAME: '{{.MODEL | default "Qwen/Qwen3-0.6B"}}'
+      BACKEND: '{{.BACKEND | default "auto"}}'
+      MAX_NEW_TOKENS: '{{.MAX_NEW_TOKENS | default "256"}}'
+      BATCH_SIZE: '{{.BATCH_SIZE | default "16"}}'
+    cmds:
+      - test -d .venv || (uv venv && uv pip install -r requirements.txt)
+      - .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+
+  bench:
+    desc: Measure step latency and throughput against a running Anchora and sidecar (RUNS=… CONCURRENCY=…)
+    cmds:
+      - scripts/bench.sh {{.RUNS | default "3"}} {{.CONCURRENCY | default "4"}}
+
+  demo-load:
+    desc: Drive every example in examples/ against a running Anchora so the dashboards fill
+    cmds:
+      - scripts/demo-load.sh {{.DURATION | default "600"}}
+
   telemetry-up:
     desc: Start Prometheus, Grafana, Loki, and Promtail (services included)
     cmds:
