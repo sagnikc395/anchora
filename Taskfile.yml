@@ -2,40 +2,22 @@ version: '3'
 
 tasks:
   default:
-    desc: Format-check, vet, and test the project
+    desc: Format-check, vet, and test
     cmds:
       - task: check
 
-  run:
-    desc: Start Anchora with config.yaml (set CONFIG=path/to/config.yaml to override)
-    cmds:
-      - go run ./cmd/anchora -config {{.CONFIG | default "config.yaml"}}
-
-  build:
-    desc: Build the anchora binary into ./bin
-    cmds:
-      - go build -o bin/anchora ./cmd/anchora
-
   test:
-    desc: Run all Go tests (backend integration tests skip without services)
+    desc: Run the unit tests with the race detector
     cmds:
       - go test -race ./...
 
   test-integration:
-    desc: Run the backend integration tests against the docker compose services
+    desc: Run the unit and Postgres integration tests against docker compose
     env:
-      ANCHORA_TEST_DATABASE_URL: postgres://anchora:anchora@localhost:5432/anchora
-      ANCHORA_TEST_REDIS_URL: redis://localhost:6379/1
+      PGFLOW_TEST_DATABASE_URL: postgres://pgflow:pgflow@localhost:5432/pgflow?sslmode=disable
     cmds:
-      - task: services-up
-      - go test -race -count=1 -run Integration ./tests/
-
-  cover:
-    desc: Write a coverage profile and open the HTML report
-    cmds:
-      - go test -coverprofile=coverage.out ./...
-      - go tool cover -html=coverage.out -o coverage.html
-      - go tool cover -func=coverage.out | tail -1
+      - docker compose up -d --wait
+      - go test -race -count=1 ./...
 
   fmt:
     desc: Format all Go source files
@@ -48,7 +30,7 @@ tasks:
       - go vet ./...
 
   check:
-    desc: Format-check, vet, and test the project
+    desc: Format-check, vet, and test
     cmds:
       - cmd: test -z "$(gofmt -l .)" || { echo 'not gofmt-clean:'; gofmt -l .; exit 1; }
         silent: true
@@ -60,64 +42,12 @@ tasks:
     cmds:
       - go mod tidy
 
-  image:
-    desc: Build the anchora container image as anchora:local
-    cmds:
-      - docker build -t anchora:local .
-
-  app-up:
-    desc: Start Anchora with PostgreSQL and Redis via docker compose
-    cmds:
-      - docker compose --profile app up -d --build --wait
-
-  app-down:
-    desc: Stop Anchora and its dependencies
-    cmds:
-      - docker compose --profile app down
-
-  agent-run:
-    desc: Start the agent sidecar natively (MODEL=… BACKEND=… MAX_NEW_TOKENS=… override the defaults)
-    dir: agent
-    env:
-      MODEL_NAME: '{{.MODEL | default "Qwen/Qwen3-0.6B"}}'
-      BACKEND: '{{.BACKEND | default "auto"}}'
-      MAX_NEW_TOKENS: '{{.MAX_NEW_TOKENS | default "256"}}'
-      BATCH_SIZE: '{{.BATCH_SIZE | default "16"}}'
-    cmds:
-      - test -d .venv || (uv venv && uv pip install -r requirements.txt)
-      - .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
-
-  bench:
-    desc: Measure step latency and throughput against a running Anchora and sidecar (RUNS=… CONCURRENCY=…)
-    cmds:
-      - scripts/bench.sh {{.RUNS | default "3"}} {{.CONCURRENCY | default "4"}}
-
-  demo-load:
-    desc: Drive every example in examples/ against a running Anchora so the dashboards fill
-    cmds:
-      - scripts/demo-load.sh {{.DURATION | default "600"}}
-
-  telemetry-up:
-    desc: Start Prometheus, Grafana, Loki, and Promtail (services included)
-    cmds:
-      - docker compose --profile telemetry up -d --wait
-
-  telemetry-down:
-    desc: Stop the observability stack
-    cmds:
-      - docker compose --profile app --profile telemetry down --remove-orphans
-
   services-up:
-    desc: Start the PostgreSQL and Redis dependencies for async jobs
+    desc: Start Postgres
     cmds:
       - docker compose up -d --wait
 
   services-down:
-    desc: Stop the PostgreSQL and Redis dependencies
+    desc: Stop Postgres
     cmds:
       - docker compose down
-
-  services-logs:
-    desc: Follow logs for the PostgreSQL and Redis dependencies
-    cmds:
-      - docker compose logs -f
