@@ -13,7 +13,7 @@ streams, fork, the agent layer, a determinism linter, a CLI, telemetry, and a
 completeness test suite. What is deliberately left out is listed under
 [Scope](#scope).
 
-Requires Go 1.25+ and Postgres 12+.
+Requires Go 1.26+ and Postgres 12+.
 
 ## Guarantees
 
@@ -332,10 +332,12 @@ parallel search legs, an approval gate, and provider selection.
 ```
 pgflow/
   pgflow.go        Engine, Config, registry, execution, shutdown
+  errors.go        sentinel errors rehydrated with checkpoints
   context.go       workflow context, function-id counter, checkpoint persistence
   step.go          Step, StepCtx, retries, timeouts, heartbeats
   tx.go            Tx steps
   primitives.go    Now, Random, UUID, Sleep
+  uuid.go          time-ordered UUIDv7 workflow ids
   concurrency.go   Go, Future
   queue.go         queues, Enqueue, dequeue sweep
   events.go        SetEvent, GetEvent
