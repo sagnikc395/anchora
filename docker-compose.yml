@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: pgflow
-      POSTGRES_USER: pgflow
-      POSTGRES_PASSWORD: pgflow
+      POSTGRES_DB: anchora
+      POSTGRES_USER: anchora
+      POSTGRES_PASSWORD: anchora
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pgflow -d pgflow"]
+      test: ["CMD-SHELL", "pg_isready -U anchora -d anchora"]
       interval: 5s
       timeout: 3s
       retries: 10

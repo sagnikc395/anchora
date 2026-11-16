@@ -1,6 +1,6 @@
 # Plan: A Postgres-Native Durable Execution Engine in Go for AI Agents
 
-Working name: `pgflow` (rename freely). Goal: a Go library, modeled on DBOS Transact, that embeds durable execution directly into an application process using Postgres as the only infrastructure dependency. No separate orchestrator server, no message broker.
+Working name: `anchora` (rename freely). Goal: a Go library, modeled on DBOS Transact, that embeds durable execution directly into an application process using Postgres as the only infrastructure dependency. No separate orchestrator server, no message broker.
 
 ---
 
@@ -30,13 +30,13 @@ Working name: `pgflow` (rename freely). Goal: a Go library, modeled on DBOS Tran
 
 ## 3. System Schema (Postgres)
 
-All tables live in a dedicated schema (`pgflow`). Migrations are embedded in the binary (`embed.FS` + a tiny migration runner, or `golang-migrate`).
+All tables live in a dedicated schema (`anchora`). Migrations are embedded in the binary (`embed.FS` + a tiny migration runner, or `golang-migrate`).
 
 ```sql
-CREATE SCHEMA IF NOT EXISTS pgflow;
+CREATE SCHEMA IF NOT EXISTS anchora;
 
 -- One row per workflow execution
-CREATE TABLE pgflow.workflow_status (
+CREATE TABLE anchora.workflow_status (
   workflow_id        TEXT PRIMARY KEY,           -- user-supplied (idempotency) or UUIDv7
   workflow_name      TEXT NOT NULL,              -- registered function name
   status             TEXT NOT NULL,              -- ENQUEUED | PENDING | SUCCESS | ERROR | CANCELLED | RETRIES_EXCEEDED
@@ -55,21 +55,21 @@ CREATE TABLE pgflow.workflow_status (
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   started_at         TIMESTAMPTZ
 );
-CREATE INDEX ON pgflow.workflow_status (status, lease_expires_at);
-CREATE INDEX ON pgflow.workflow_status (queue_name, status, priority, created_at)
+CREATE INDEX ON anchora.workflow_status (status, lease_expires_at);
+CREATE INDEX ON anchora.workflow_status (queue_name, status, priority, created_at)
   WHERE status = 'ENQUEUED';
 
 -- Inputs/outputs separated so frequent status updates do not rewrite large blobs
-CREATE TABLE pgflow.workflow_io (
-  workflow_id TEXT PRIMARY KEY REFERENCES pgflow.workflow_status ON DELETE CASCADE,
+CREATE TABLE anchora.workflow_io (
+  workflow_id TEXT PRIMARY KEY REFERENCES anchora.workflow_status ON DELETE CASCADE,
   inputs      BYTEA NOT NULL,
   output      BYTEA,
   error       JSONB
 );
 
 -- The event log: one row per completed step / durable operation
-CREATE TABLE pgflow.operation_outputs (
-  workflow_id    TEXT NOT NULL REFERENCES pgflow.workflow_status ON DELETE CASCADE,
+CREATE TABLE anchora.operation_outputs (
+  workflow_id    TEXT NOT NULL REFERENCES anchora.workflow_status ON DELETE CASCADE,
   function_id    INT  NOT NULL,                -- position in the workflow's step sequence
   function_name  TEXT NOT NULL,                -- used for nondeterminism detection
   kind           TEXT NOT NULL,                -- STEP | TX | SLEEP | RECV | SEND | CHILD | NOW | RAND | SET_EVENT
@@ -83,7 +83,7 @@ CREATE TABLE pgflow.operation_outputs (
 );
 
 -- In-flight step tracking (observability + heartbeats), deleted/ignored once checkpointed
-CREATE TABLE pgflow.step_attempts (
+CREATE TABLE anchora.step_attempts (
   workflow_id   TEXT NOT NULL,
   function_id   INT  NOT NULL,
   attempt       INT  NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE pgflow.step_attempts (
 );
 
 -- Durable messaging (signals into a workflow, e.g. human approval)
-CREATE TABLE pgflow.notifications (
+CREATE TABLE anchora.notifications (
   message_id     TEXT PRIMARY KEY,             -- dedupe key for exactly-once send
   destination_id TEXT NOT NULL,
   topic          TEXT NOT NULL DEFAULT '',
@@ -102,10 +102,10 @@ CREATE TABLE pgflow.notifications (
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   consumed_at    TIMESTAMPTZ
 );
-CREATE INDEX ON pgflow.notifications (destination_id, topic, created_at) WHERE consumed_at IS NULL;
+CREATE INDEX ON anchora.notifications (destination_id, topic, created_at) WHERE consumed_at IS NULL;
 
 -- Key/value events published by a workflow (progress, partial results)
-CREATE TABLE pgflow.workflow_events (
+CREATE TABLE anchora.workflow_events (
   workflow_id TEXT NOT NULL,
   key         TEXT NOT NULL,
   value       BYTEA NOT NULL,
@@ -113,7 +113,7 @@ CREATE TABLE pgflow.workflow_events (
 );
 
 -- Append-only streams (LLM token streams, agent traces) readable by clients
-CREATE TABLE pgflow.streams (
+CREATE TABLE anchora.streams (
   workflow_id TEXT NOT NULL,
   stream_key  TEXT NOT NULL,
   seq         BIGINT NOT NULL,
@@ -122,7 +122,7 @@ CREATE TABLE pgflow.streams (
 );
 
 -- Queue configuration
-CREATE TABLE pgflow.queues (
+CREATE TABLE anchora.queues (
   name             TEXT PRIMARY KEY,
   global_concurrency INT,
   worker_concurrency INT,
@@ -138,33 +138,33 @@ Postgres triggers on `notifications` and `workflow_events` call `pg_notify` so w
 ## 4. Public Go API (target shape)
 
 ```go
-eng, _ := pgflow.New(ctx, pgflow.Config{
+eng, _ := anchora.New(ctx, anchora.Config{
     DatabaseURL: os.Getenv("DATABASE_URL"),
     AppVersion:  "", // default: hash of registered workflow names + build info
     ExecutorID:  "", // default: hostname-pid-random
 })
 
 // Registration happens before Launch so recovery can find functions by name
-var ResearchAgent = pgflow.RegisterWorkflow(eng, "research_agent", researchAgent)
+var ResearchAgent = anchora.RegisterWorkflow(eng, "research_agent", researchAgent)
 
 eng.Launch() // runs migrations, starts recovery loop, queue pollers, listeners
 
-h, _ := ResearchAgent.Start(ctx, "Summarize X", pgflow.WithWorkflowID("req-123"))
+h, _ := ResearchAgent.Start(ctx, "Summarize X", anchora.WithWorkflowID("req-123"))
 out, err := h.Result(ctx)
 ```
 
 Workflow code:
 
 ```go
-func researchAgent(ctx *pgflow.Context, task string) (Report, error) {
-    plan, err := pgflow.Step(ctx, "plan", func(sc pgflow.StepCtx) (Plan, error) {
+func researchAgent(ctx *anchora.Context, task string) (Report, error) {
+    plan, err := anchora.Step(ctx, "plan", func(sc anchora.StepCtx) (Plan, error) {
         return llm.Plan(sc, task) // non-deterministic: runs once, output checkpointed
-    }, pgflow.Retry(5, time.Second, 2.0), pgflow.Timeout(60*time.Second))
+    }, anchora.Retry(5, time.Second, 2.0), anchora.Timeout(60*time.Second))
     if err != nil { return Report{}, err }
 
     var notes []Note
     for _, q := range plan.Queries {            // deterministic loop over recorded data
-        n, err := pgflow.Step(ctx, "search", func(sc pgflow.StepCtx) (Note, error) {
+        n, err := anchora.Step(ctx, "search", func(sc anchora.StepCtx) (Note, error) {
             return tools.WebSearch(sc, q)
         })
         if err != nil { return Report{}, err }
@@ -172,12 +172,12 @@ func researchAgent(ctx *pgflow.Context, task string) (Report, error) {
     }
 
     // Human-in-the-loop: durable wait, survives restarts
-    ok, err := pgflow.Recv[bool](ctx, "approval", 24*time.Hour)
+    ok, err := anchora.Recv[bool](ctx, "approval", 24*time.Hour)
     if err != nil || !ok { return Report{}, ErrRejected }
 
-    pgflow.Sleep(ctx, 10*time.Minute) // durable timer
-    now := pgflow.Now(ctx)            // recorded clock read
-    return pgflow.Step(ctx, "write", func(sc pgflow.StepCtx) (Report, error) {
+    anchora.Sleep(ctx, 10*time.Minute) // durable timer
+    now := anchora.Now(ctx)            // recorded clock read
+    return anchora.Step(ctx, "write", func(sc anchora.StepCtx) (Report, error) {
         return llm.Write(sc, notes, now)
     })
 }
@@ -228,7 +228,7 @@ Key points:
 - Optimization: batch the "read history" step by loading all `operation_outputs` for the workflow once at the start of recovery into an in-memory map, instead of one SELECT per step.
 
 ### 5.3 Transaction steps (exactly-once)
-`pgflow.Tx(ctx, name, func(tx pgx.Tx) (T, error))` runs the user's SQL and the `operation_outputs` insert in the same Postgres transaction. Either both commit or neither does. This is the transactional outbox pattern and is the one place you get true exactly-once semantics.
+`anchora.Tx(ctx, name, func(tx pgx.Tx) (T, error))` runs the user's SQL and the `operation_outputs` insert in the same Postgres transaction. Either both commit or neither does. This is the transactional outbox pattern and is the one place you get true exactly-once semantics.
 
 ### 5.4 Completing a workflow
 Single transaction: update `workflow_status.status` to SUCCESS/ERROR, write `workflow_io.output`, guarded by the epoch fence. Notify waiters with `pg_notify`.
@@ -237,10 +237,10 @@ Single transaction: update `workflow_status.status` to SUCCESS/ERROR, write `wor
 - **Startup recovery:** select PENDING workflows where `executor_id = me` (restart of same identity) or `lease_expires_at < now()`.
 - **Continuous recovery (multi-worker):** a loop claims expired leases:
   ```sql
-  UPDATE pgflow.workflow_status SET executor_id=$me, lease_expires_at=now()+$lease,
+  UPDATE anchora.workflow_status SET executor_id=$me, lease_expires_at=now()+$lease,
          epoch=epoch+1, recovery_attempts=recovery_attempts+1
   WHERE workflow_id IN (
-    SELECT workflow_id FROM pgflow.workflow_status
+    SELECT workflow_id FROM anchora.workflow_status
     WHERE status='PENDING' AND lease_expires_at < now() AND app_version=$myVersion
     ORDER BY lease_expires_at LIMIT $n FOR UPDATE SKIP LOCKED)
   RETURNING workflow_id, workflow_name, epoch;
@@ -257,18 +257,18 @@ Workflow code must produce the same sequence of engine calls on every replay. Pr
 
 | Forbidden in workflow code | Engine replacement |
 |---|---|
-| `time.Now()` | `pgflow.Now(ctx)` (recorded) |
-| `rand.*`, `uuid.New()` | `pgflow.Random(ctx)`, `pgflow.UUID(ctx)` (recorded) |
-| `time.Sleep` | `pgflow.Sleep(ctx, d)`: records the absolute wake time on first execution; on replay sleeps only the remaining duration |
-| network / DB calls | `pgflow.Step` / `pgflow.Tx` |
+| `time.Now()` | `anchora.Now(ctx)` (recorded) |
+| `rand.*`, `uuid.New()` | `anchora.Random(ctx)`, `anchora.UUID(ctx)` (recorded) |
+| `time.Sleep` | `anchora.Sleep(ctx, d)`: records the absolute wake time on first execution; on replay sleeps only the remaining duration |
+| network / DB calls | `anchora.Step` / `anchora.Tx` |
 | reading env/config that may change | wrap in a step |
-| bare `go func()` | `pgflow.Go(ctx, fn)` returning a future; function ids are reserved at spawn time in program order so concurrent steps get deterministic slots |
+| bare `go func()` | `anchora.Go(ctx, fn)` returning a future; function ids are reserved at spawn time in program order so concurrent steps get deterministic slots |
 | map iteration order feeding step order | lint rule; sort keys |
 
 Detection layers:
 1. **Runtime:** `function_name` mismatch on replay returns `NondeterminismError`, marks workflow ERROR with a clear diff (expected vs actual step at index N).
-2. **Static:** a `go/analysis` linter (`pgflowvet`) that flags `time.Now`, `math/rand`, `net/http`, `os.Getenv`, and raw `go` statements inside functions registered as workflows. This is a strong resume differentiator.
-3. **Replay tests:** `pgflowtest.Replay(t, workflowFn, historyFromProdDB)` re-runs a recorded history against new code and reports divergence before deploy.
+2. **Static:** a `go/analysis` linter (`anchoravet`) that flags `time.Now`, `math/rand`, `net/http`, `os.Getenv`, and raw `go` statements inside functions registered as workflows. This is a strong resume differentiator.
+3. **Replay tests:** `anchoratest.Replay(t, workflowFn, historyFromProdDB)` re-runs a recorded history against new code and reports divergence before deploy.
 
 ---
 
@@ -303,12 +303,12 @@ Queues are just `workflow_status` rows with `status='ENQUEUED'` and a `queue_nam
 Dequeue loop per queue:
 ```sql
 WITH candidates AS (
-  SELECT workflow_id FROM pgflow.workflow_status
+  SELECT workflow_id FROM anchora.workflow_status
   WHERE queue_name=$q AND status='ENQUEUED' AND app_version=$v
   ORDER BY priority DESC, created_at
   LIMIT $freeSlots
   FOR UPDATE SKIP LOCKED)
-UPDATE pgflow.workflow_status w SET status='PENDING', executor_id=$me,
+UPDATE anchora.workflow_status w SET status='PENDING', executor_id=$me,
        started_at=now(), lease_expires_at=now()+$lease, epoch=epoch+1
 FROM candidates c WHERE w.workflow_id=c.workflow_id
 RETURNING w.workflow_id, w.workflow_name, w.epoch;
@@ -324,7 +324,7 @@ RETURNING w.workflow_id, w.workflow_name, w.epoch;
 
 ## 9. Composition Primitives
 
-- **Child workflows:** `pgflow.Child(ctx, wf, input)`; child id is deterministic (`parentID/functionID`) so replay reattaches to the same child instead of spawning a duplicate.
+- **Child workflows:** `anchora.Child(ctx, wf, input)`; child id is deterministic (`parentID/functionID`) so replay reattaches to the same child instead of spawning a duplicate.
 - **Send / Recv:** `Send(ctx, destID, topic, msg)` uses `message_id = senderWorkflowID:functionID` for exactly-once delivery. `Recv` consumes the oldest unconsumed message in a transaction that also writes the checkpoint, so a message is never lost or double-consumed.
 - **Events:** `SetEvent(ctx, key, v)` / `GetEvent[T](id, key, timeout)` for publishing status and partial results to external callers.
 - **Streams:** `WriteStream(ctx, key, chunk)` appends; clients tail with `LISTEN`. Used for LLM token streaming while the durable checkpoint stores only the final assembled response.
@@ -338,14 +338,14 @@ RETURNING w.workflow_id, w.workflow_name, w.epoch;
 Replaying old histories against changed code is the main source of production bugs in durable execution systems.
 
 1. **Version pinning (default):** every workflow row stores `app_version`. Executors only recover workflows matching their own version. During deploys, old and new binaries run side by side until old workflows drain.
-2. **Patching API (advanced):** `if pgflow.Patched(ctx, "use-new-planner") { ... } else { ... }`. The first live execution records the patch marker; replays of histories without the marker take the old branch.
+2. **Patching API (advanced):** `if anchora.Patched(ctx, "use-new-planner") { ... } else { ... }`. The first live execution records the patch marker; replays of histories without the marker take the old branch.
 3. **Admin tooling:** list pending workflows per version; force-migrate or cancel stragglers.
 
 ---
 
 ## 11. AI-Agent Layer (built on top of the core)
 
-Keep this as a separate package (`pgflow/agent`) so the core stays generic.
+Keep this as a separate package (`anchora/agent`) so the core stays generic.
 
 - **`agent.LLMCall`**: a step wrapper that records model, prompt hash, token usage, latency, cost, and the full response. Provider adapters for OpenAI, Anthropic, and a local model (Ollama) behind one interface.
 - **Agent loop as a workflow:** `for !done { resp := LLMCall; for each tool_call: Step(tool) }`. Every iteration is replay-safe; a crash mid-loop resumes at the exact tool call.
@@ -362,7 +362,7 @@ Keep this as a separate package (`pgflow/agent`) so the core stays generic.
 
 - OpenTelemetry: one span per workflow, child spans per step with attributes (function_id, attempt, replayed=true/false).
 - Prometheus metrics: steps/sec, checkpoint latency p50/p99, replay length, recovery count, queue depth, lease expirations.
-- `pgflow` CLI: `list`, `get <id>`, `steps <id>`, `cancel`, `resume`, `fork <id> --from N`, `gc --older-than 30d`.
+- `anchora` CLI: `list`, `get <id>`, `steps <id>`, `cancel`, `resume`, `fork <id> --from N`, `gc --older-than 30d`.
 - Optional small web UI (read-only) rendering a workflow timeline from `operation_outputs`.
 - Garbage collection: retention policy deleting terminal workflows older than N days, in batches.
 
@@ -372,7 +372,7 @@ Keep this as a separate package (`pgflow/agent`) so the core stays generic.
 
 1. **Unit tests** for replay logic with an in-memory store implementing the same `Store` interface.
 2. **Integration tests** against real Postgres via `testcontainers-go`.
-3. **Crash injection:** an env-driven fault hook `PGFLOW_CRASH_AFTER=<step_name>:<before|after_checkpoint>` that calls `os.Exit(1)`. A harness starts the process, kills it at random points, restarts it, and asserts:
+3. **Crash injection:** an env-driven fault hook `anchora_CRASH_AFTER=<step_name>:<before|after_checkpoint>` that calls `os.Exit(1)`. A harness starts the process, kills it at random points, restarts it, and asserts:
    - every workflow eventually reaches a terminal state,
    - final outputs equal those of an uninterrupted run,
    - each `Tx` step's business write happened exactly once,
@@ -387,8 +387,8 @@ Keep this as a separate package (`pgflow/agent`) so the core stays generic.
 ## 14. Repository Layout
 
 ```
-pgflow/
-  cmd/pgflow/            CLI
+anchora/
+  cmd/anchora/            CLI
   engine.go              New, Launch, Shutdown, registry
   context.go             workflow Context, function id counter, fencing epoch
   step.go                Step, Tx, retries, timeouts, heartbeats
@@ -402,8 +402,8 @@ pgflow/
     memory/              in-memory store for unit tests
   serde/                 codec interface (JSON default, gob/protobuf optional)
   agent/                 LLM adapters, tool registry, agent loop, budgets
-  pgflowvet/             go/analysis determinism linter
-  pgflowtest/            replay test helpers, crash harness
+  anchoravet/             go/analysis determinism linter
+  anchoratest/            replay test helpers, crash harness
   examples/
     research-agent/
     coding-agent-sandbox/
@@ -423,7 +423,7 @@ Dependencies: `jackc/pgx/v5` (pool, LISTEN/NOTIFY, COPY), `testcontainers-go`, `
 | 1 (weeks 2 to 3) | Step checkpointing, replay, function-id counter, nondeterminism detection, workflow completion | Crash-injection test passes for linear workflows |
 | 2 (week 4) | Recovery with leases + epoch fencing, multi-executor, `Tx` steps | Two-executor race and zombie tests pass under `-race` |
 | 3 (week 5) | Retries, timeouts, heartbeats, error serialization, durable Sleep, Now/Random/UUID | Heartbeat-timeout and retry tests pass |
-| 4 (week 6) | Child workflows, Send/Recv, events, streams, cancellation, `pgflow.Go` | Human-approval example survives restarts mid-wait |
+| 4 (week 6) | Child workflows, Send/Recv, events, streams, cancellation, `anchora.Go` | Human-approval example survives restarts mid-wait |
 | 5 (week 7) | Queues, concurrency limits, rate limits, partitions | Benchmark: N workers draining 100k jobs, no double execution |
 | 6 (week 8) | Agent package: LLM adapters, tools, budgets, sandbox activity, fork | Research agent demo: kill -9 mid-run, resumes without repeating paid LLM calls |
 | 7 (week 9) | Versioning (pinning + Patched), linter, CLI, OTel, metrics, GC | Linter catches seeded violations; dashboards show step timelines |

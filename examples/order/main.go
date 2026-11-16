@@ -1,13 +1,13 @@
-// Command order is a small end-to-end pgflow example.
+// Command order is a small end-to-end anchora example.
 //
 // Start the order workflow:
 //
-//	DATABASE_URL=postgres://pgflow:pgflow@localhost:5432/pgflow?sslmode=disable go run ./examples/order
+//	DATABASE_URL=postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable go run ./examples/order
 //
 // It quotes the order, then waits for an approval message. In another
 // terminal, approve it:
 //
-//	DATABASE_URL=postgres://pgflow:pgflow@localhost:5432/pgflow?sslmode=disable \
+//	DATABASE_URL=postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable \
 //	  go run ./examples/order -approve
 //
 // Kill and restart either process at any point: completed steps replay from
@@ -23,7 +23,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/sagnikc395/anchora/pgflow"
+	"github.com/sagnikc395/anchora/anchora"
 )
 
 type order struct {
@@ -46,7 +46,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	engine, err := pgflow.New(ctx, pgflow.Config{
+	engine, err := anchora.New(ctx, anchora.Config{
 		DatabaseURL: databaseURL,
 		Logf:        log.Printf,
 	})
@@ -62,29 +62,29 @@ func main() {
 	}()
 
 	// Registration must happen before the first Start.
-	orders := pgflow.RegisterWorkflow(engine, "process_order", func(ctx *pgflow.Context, in order) (string, error) {
-		quote, err := pgflow.Step(ctx, "quote", func(sc pgflow.StepCtx) (string, error) {
+	orders := anchora.RegisterWorkflow(engine, "process_order", func(ctx *anchora.Context, in order) (string, error) {
+		quote, err := anchora.Step(ctx, "quote", func(sc anchora.StepCtx) (string, error) {
 			return fmt.Sprintf("%s totaling %d", in.ID, in.Total), nil
 		})
 		if err != nil {
 			return "", err
 		}
-		approved, err := pgflow.Recv[bool](ctx, approval, 24*time.Hour)
+		approved, err := anchora.Recv[bool](ctx, approval, 24*time.Hour)
 		if err != nil {
 			return "", err
 		}
 		if !approved {
 			return "", fmt.Errorf("order %s rejected", in.ID)
 		}
-		if err := pgflow.Sleep(ctx, time.Second); err != nil {
+		if err := anchora.Sleep(ctx, time.Second); err != nil {
 			return "", err
 		}
-		return pgflow.Step(ctx, "ship", func(sc pgflow.StepCtx) (string, error) {
+		return anchora.Step(ctx, "ship", func(sc anchora.StepCtx) (string, error) {
 			return "shipped " + quote, nil
 		})
 	})
-	approver := pgflow.RegisterWorkflow(engine, "approve_order", func(ctx *pgflow.Context, in order) (string, error) {
-		if err := pgflow.Send(ctx, orderID, approval, true); err != nil {
+	approver := anchora.RegisterWorkflow(engine, "approve_order", func(ctx *anchora.Context, in order) (string, error) {
+		if err := anchora.Send(ctx, orderID, approval, true); err != nil {
 			return "", err
 		}
 		return "approved " + in.ID, nil
@@ -103,7 +103,7 @@ func main() {
 		return
 	}
 
-	handle, err := orders.Start(ctx, order{ID: orderID, Total: 42}, pgflow.WithWorkflowID(orderID))
+	handle, err := orders.Start(ctx, order{ID: orderID, Total: 42}, anchora.WithWorkflowID(orderID))
 	if err != nil {
 		log.Fatal(err)
 	}

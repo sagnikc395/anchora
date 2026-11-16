@@ -1,4 +1,4 @@
-// Command research-agent is the plan's §11 demo on pgflow: a research agent
+// Command research-agent is the plan's §11 demo on anchora: a research agent
 // whose every model call and tool call is a durable step. Kill the process at
 // any point mid-run and restart it: completed steps replay from Postgres
 // without repeating paid calls, the human-approval gate survives restarts,
@@ -17,8 +17,8 @@
 //
 // The run publishes progress events; watch them with the CLI:
 //
-//	go run ./cmd/pgflow list
-//	go run ./cmd/pgflow steps <workflow-id>
+//	go run ./cmd/anchora list
+//	go run ./cmd/anchora steps <workflow-id>
 //
 // Approve the final report from a second terminal with -approve.
 package main
@@ -32,8 +32,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/sagnikc395/anchora/pgflow"
-	"github.com/sagnikc395/anchora/pgflow/agent"
+	"github.com/sagnikc395/anchora/anchora"
+	"github.com/sagnikc395/anchora/anchora/agent"
 )
 
 type plan struct {
@@ -75,7 +75,7 @@ func main() {
 	flag.Parse()
 
 	ctx := context.Background()
-	engine, err := pgflow.New(ctx, pgflow.Config{DatabaseURL: os.Getenv("DATABASE_URL"), Logf: log.Printf})
+	engine, err := anchora.New(ctx, anchora.Config{DatabaseURL: os.Getenv("DATABASE_URL"), Logf: log.Printf})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func main() {
 		},
 	})
 
-	var research = pgflow.RegisterWorkflow(engine, "research_agent", func(ctx *pgflow.Context, task string) (map[string]any, error) {
+	var research = anchora.RegisterWorkflow(engine, "research_agent", func(ctx *anchora.Context, task string) (map[string]any, error) {
 		// Plan the queries. One recorded call; a crash never replans.
 		planOut, err := agent.Call(ctx, "plan", agent.CallConfig{
 			Provider:         provider,
@@ -121,9 +121,9 @@ func main() {
 		// Search the queries in parallel. Each parallel leg is its own
 		// checkpointed slot, so a crash resumes exactly where it stopped.
 		type leg struct{ Note note }
-		legs := make([]*pgflow.Future[leg], 0, len(p.Queries))
+		legs := make([]*anchora.Future[leg], 0, len(p.Queries))
 		for i, q := range p.Queries {
-			legs = append(legs, pgflow.Go(ctx, fmt.Sprintf("search-%d", i), func(sc pgflow.StepCtx) (leg, error) {
+			legs = append(legs, anchora.Go(ctx, fmt.Sprintf("search-%d", i), func(sc anchora.StepCtx) (leg, error) {
 				args, _ := json.Marshal(map[string]any{"query": q})
 				tool, _ := tools.Get("search")
 				out, err := tool.Fn(sc, string(args))
@@ -164,27 +164,27 @@ func main() {
 
 		// Human-in-the-loop gate: survives restarts; the approval arrives
 		// from `go run ./examples/research-agent -approve`.
-		approved, err := pgflow.Recv[bool](ctx, "approval", 24*time.Hour)
+		approved, err := anchora.Recv[bool](ctx, "approval", 24*time.Hour)
 		if err != nil {
 			return nil, err
 		}
 		if !approved {
 			return nil, fmt.Errorf("research %q rejected", task)
 		}
-		published, err := pgflow.Step(ctx, "publish", func(sc pgflow.StepCtx) (map[string]any, error) {
+		published, err := anchora.Step(ctx, "publish", func(sc anchora.StepCtx) (map[string]any, error) {
 			return map[string]any{"task": task, "report": draft, "notes": notes}, nil
 		})
 		if err != nil {
 			return nil, err
 		}
-		if err := pgflow.SetEvent(ctx, "report", published); err != nil {
+		if err := anchora.SetEvent(ctx, "report", published); err != nil {
 			return nil, err
 		}
 		return published, nil
 	})
 
-	approver := pgflow.RegisterWorkflow(engine, "approve_research", func(ctx *pgflow.Context, id string) (string, error) {
-		if err := pgflow.Send(ctx, id, "approval", true); err != nil {
+	approver := anchora.RegisterWorkflow(engine, "approve_research", func(ctx *anchora.Context, id string) (string, error) {
+		if err := anchora.Send(ctx, id, "approval", true); err != nil {
 			return "", err
 		}
 		return "approved " + id, nil
@@ -207,7 +207,7 @@ func main() {
 	}
 
 	task := "durable execution engines for AI agents"
-	h, err := research.Start(ctx, task, pgflow.WithWorkflowID("research-demo"))
+	h, err := research.Start(ctx, task, anchora.WithWorkflowID("research-demo"))
 	if err != nil {
 		log.Fatal(err)
 	}
