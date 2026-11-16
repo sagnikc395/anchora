@@ -1,5 +1,4 @@
-# pgflow
-
+# anchora
 A Postgres-native durable execution engine for Go. A workflow is a plain Go
 function; every engine call it makes is checkpointed in Postgres before its
 result is returned. If the process dies, the workflow is re-executed from the
@@ -19,8 +18,8 @@ Requires Go 1.26+ and Postgres 12+.
 
 | Property | How |
 | --- | --- |
-| The workflow is a row | `pgflow.workflow_status` plus its input/output in `pgflow.workflow_io` |
-| A result is observed only after it is durable | every step writes `pgflow.operation_outputs` before returning |
+| The workflow is a row | `anchora.workflow_status` plus its input/output in `anchora.workflow_io` |
+| A result is observed only after it is durable | every step writes `anchora.operation_outputs` before returning |
 | Replay is exact | one monotonic function-id counter per execution; each call reads its recorded slot first |
 | Side effects are at-least-once | a crash between a live call and its checkpoint repeats that call |
 | Transactional steps are exactly-once | the business writes and the checkpoint commit in one Postgres transaction |
@@ -31,7 +30,7 @@ Requires Go 1.26+ and Postgres 12+.
 ## Quick start
 
 ```go
-eng, err := pgflow.New(ctx, pgflow.Config{
+eng, err := anchora.New(ctx, anchora.Config{
     DatabaseURL: os.Getenv("DATABASE_URL"),
 })
 if err != nil {
@@ -40,9 +39,9 @@ if err != nil {
 defer eng.Shutdown(ctx)
 
 // Register before Launch (Start launches the engine on first use).
-var Research = pgflow.RegisterWorkflow(eng, "research_agent", researchAgent)
+var Research = anchora.RegisterWorkflow(eng, "research_agent", researchAgent)
 
-h, err := Research.Start(ctx, "Summarize X", pgflow.WithWorkflowID("req-123"))
+h, err := Research.Start(ctx, "Summarize X", anchora.WithWorkflowID("req-123"))
 if err != nil {
     log.Fatal(err)
 }
@@ -55,22 +54,22 @@ handle to the existing execution instead of running a duplicate.
 ## A workflow
 
 ```go
-func researchAgent(ctx *pgflow.Context, task string) (Report, error) {
-    plan, err := pgflow.Step(ctx, "plan", func(sc pgflow.StepCtx) (Plan, error) {
+func researchAgent(ctx *anchora.Context, task string) (Report, error) {
+    plan, err := anchora.Step(ctx, "plan", func(sc anchora.StepCtx) (Plan, error) {
         return llm.Plan(sc, task) // runs once; the result is checkpointed
-    }, pgflow.Retry(5, time.Second, 2), pgflow.Timeout(60*time.Second))
+    }, anchora.Retry(5, time.Second, 2), anchora.Timeout(60*time.Second))
     if err != nil {
         return Report{}, err
     }
 
-    notes, err := pgflow.Step(ctx, "search", func(sc pgflow.StepCtx) ([]Note, error) {
+    notes, err := anchora.Step(ctx, "search", func(sc anchora.StepCtx) ([]Note, error) {
         return tools.Search(sc, plan.Queries)
     })
     if err != nil {
         return Report{}, err
     }
 
-    approved, err := pgflow.Recv[bool](ctx, "approval", 24*time.Hour) // durable wait
+    approved, err := anchora.Recv[bool](ctx, "approval", 24*time.Hour) // durable wait
     if err != nil {
         return Report{}, err
     }
@@ -78,14 +77,14 @@ func researchAgent(ctx *pgflow.Context, task string) (Report, error) {
         return Report{}, ErrRejected
     }
 
-    if err := pgflow.Sleep(ctx, 10*time.Minute); err != nil { // durable timer
+    if err := anchora.Sleep(ctx, 10*time.Minute); err != nil { // durable timer
         return Report{}, err
     }
-    now, err := pgflow.Now(ctx) // recorded clock read
+    now, err := anchora.Now(ctx) // recorded clock read
     if err != nil {
         return Report{}, err
     }
-    return pgflow.Tx(ctx, "store", func(sc pgflow.StepCtx, tx pgflow.TxConn) (Report, error) {
+    return anchora.Tx(ctx, "store", func(sc anchora.StepCtx, tx anchora.TxConn) (Report, error) {
         report := buildReport(notes, now)
         _, err := tx.Exec(sc, `INSERT INTO reports (id, body) VALUES ($1, $2)`, ctx.WorkflowID(), report.Body)
         return report, err
@@ -110,7 +109,7 @@ func researchAgent(ctx *pgflow.Context, task string) (Report, error) {
 | `Enqueue(ctx, workflow, input, opts...)` | enqueue a child onto a queue as a recorded operation |
 | `ContinueAsNew(ctx, workflow, input)` | end this execution and carry state into a fresh one |
 | `Patched(ctx, "name")` | branching into new behavior for new histories only |
-| `pgflow.Fork(ctx, workflow, id, fromSlot)` | rerun a recorded workflow from a slot without repaying earlier steps |
+| `anchora.Fork(ctx, workflow, id, fromSlot)` | rerun a recorded workflow from a slot without repaying earlier steps |
 | `Workflow.Start` / `Handle.Result` | start an execution and wait for its output |
 | `Engine.RegisterQueue` | drain a named queue with concurrency, rate, and partition limits |
 | `Engine.Cancel` | cancel a pending workflow anywhere in the fleet |
@@ -134,7 +133,7 @@ receives the checkpoint.
 2. Look it up in the preloaded history. If present, verify the recorded kind and
    name, then return the recorded value or error. `fn` does not run.
 3. Run `fn` with retries, timeouts, and heartbeats. Attempt rows go to
-   `pgflow.step_attempts`.
+   `anchora.step_attempts`.
 4. Insert the checkpoint with the execution's epoch. The insert only happens if
    the workflow row still has that epoch, and `ON CONFLICT DO NOTHING` makes the
    first writer win.
@@ -146,7 +145,7 @@ workflow stays resumable.
 
 ## Schema
 
-All state lives in the `pgflow` schema, created by embedded migrations on
+All state lives in the `anchora` schema, created by embedded migrations on
 `Launch`:
 
 | Table | Contents |
@@ -167,7 +166,7 @@ A queue is a name over `ENQUEUED` rows. `WithQueue`, `WithPriority`, and
 executor:
 
 ```go
-eng.RegisterQueue(ctx, pgflow.Queue{
+eng.RegisterQueue(ctx, anchora.Queue{
     Name:                  "llm",
     LocalConcurrency:      4,               // per executor
     GlobalConcurrency:     20,              // across the fleet
@@ -186,13 +185,13 @@ enqueueing a duplicate.
 
 ## Fork, patches, and continuations
 
-- `pgflow.Fork(ctx, workflow, sourceID, fromSlot)` copies the source's history
+- `anchora.Fork(ctx, workflow, sourceID, fromSlot)` copies the source's history
   below the slot and runs live from there: rerun an agent from step 7 without
   repaying steps 1–6.
-- `pgflow.Patched(ctx, "use-new-planner")` returns true for fresh executions
+- `anchora.Patched(ctx, "use-new-planner")` returns true for fresh executions
   (recording a marker) and false for replays of older history, letting you add
   behavior while old executions replay their old branch.
-- `pgflow.ContinueAsNew(ctx, workflow, state)` ends the current execution and
+- `anchora.ContinueAsNew(ctx, workflow, state)` ends the current execution and
   starts a fresh one with a fresh history; awaited handles follow the chain.
   Long-running agent loops call it before their history becomes unbounded.
 
@@ -206,7 +205,7 @@ go test -race ./...
 task test-integration      # starts docker compose, then runs everything
 ```
 
-Unit tests run entirely on `pgflow/memory`, an in-memory `pgflow.Store` with
+Unit tests run entirely on `anchora/memory`, an in-memory `anchora.Store` with
 the same fencing and first-writer-wins rules. They cover replay and crash
 recovery (including mid-`Sleep`, mid-`Recv`, and mid-parallel-`Go` crashes),
 nondeterminism detection, zombie-epoch fencing, retries/timeouts/heartbeats,
@@ -219,15 +218,15 @@ The integration tests run the same scenarios against real Postgres —
 transactional-step exactly-once, recovery after executor loss, epoch fencing,
 Send/Recv, queues, fork, events and streams, continuations, migration
 idempotency, enqueue idempotence across a restart, and error replay. They run
-only when `PGFLOW_TEST_DATABASE_URL` is set.
+only when `anchora_TEST_DATABASE_URL` is set.
 
 ## Replay testing
 
-`pgflow/pgflowtest` replays a recorded history against changed code:
+`anchora/anchoratest` replays a recorded history against changed code:
 
 ```go
-history, _ := pgflowtest.History(ctx, store, "req-123")
-if _, err := pgflowtest.Replay(t, newCode, "research_agent", history, input); err != nil {
+history, _ := anchoratest.History(ctx, store, "req-123")
+if _, err := anchoratest.Replay(t, newCode, "research_agent", history, input); err != nil {
     // ErrNondeterminism names the first slot where new code diverges.
 }
 ```
@@ -242,19 +241,19 @@ Apple M4, in-memory store (the Postgres path adds a row write per step):
 
 ```
 BenchmarkCheckpointOverhead/plain-function    0.24 ns/op      (baseline function call)
-BenchmarkCheckpointOverhead/pgflow-step       1.8 µs/op       (engine + checkpoint write)
+BenchmarkCheckpointOverhead/anchora-step       1.8 µs/op       (engine + checkpoint write)
 BenchmarkQueuedWorkflows                      ~2,100 jobs/s    local concurrency 8
 ```
 
-Run with `go test -bench . ./pgflow/`.
+Run with `go test -bench . ./anchora/`.
 
 ## Determinism rules
 
 Workflow bodies must make the same sequence of engine calls on every replay:
 
-- use `pgflow.Now`, `pgflow.Random`, and `pgflow.UUID` instead of `time.Now`,
+- use `anchora.Now`, `anchora.Random`, and `anchora.UUID` instead of `time.Now`,
   `math/rand`, and direct id generation;
-- use `pgflow.Sleep` instead of `time.Sleep`;
+- use `anchora.Sleep` instead of `time.Sleep`;
 - wrap every network or database call in `Step` or `Tx`;
 - do not spawn bare goroutines that make engine calls — engine calls are
   positional, so start them in program order.
@@ -264,8 +263,8 @@ against an existing history returns `ErrNondeterminism` naming both operations,
 and fails the workflow instead of producing a wrong result.
 
 Errors rehydrated from history keep the engine's sentinels matchable
-(`errors.Is(err, pgflow.ErrTimeout)`, `ErrCancelled`, `ErrFenced`,
-`ErrNondeterminism`). Other errors come back as `*pgflow.StepError` with the
+(`errors.Is(err, anchora.ErrTimeout)`, `ErrCancelled`, `ErrFenced`,
+`ErrNondeterminism`). Other errors come back as `*anchora.StepError` with the
 original type name and message.
 
 ## Recovery and versioning
@@ -289,13 +288,13 @@ completed step.
 
 ## Tooling
 
-- `cmd/pgflow` — operator CLI: `list`, `get <id>`, `steps <id>`, `cancel`,
+- `cmd/anchora` — operator CLI: `list`, `get <id>`, `steps <id>`, `cancel`,
   `resume`, `fork <id> --from <n>`, `gc --older-than 30d`. Reads
   `DATABASE_URL`.
-- `pgflow/pgflowvet` — a `go/analysis` linter that fails workflow functions
+- `anchora/anchoravet` — a `go/analysis` linter that fails workflow functions
   that call `time.Now`, `math/rand`, `net/http`, `os` env lookups, direct UUID
   generation, or spawn bare goroutines. Step bodies (`StepCtx` first parameter)
-  are exempt. Run: `go vet -vettool=$(which pgflowvet) ./...`.
+  are exempt. Run: `go vet -vettool=$(which anchoravet) ./...`.
 - OpenTelemetry: a span per workflow execution and per step attempt with
   workflow id, function id, and attempt attributes; wire any `otel.Tracer`.
 - Prometheus: checkpoint writes and durations, recoveries, dequeued counts,
@@ -303,7 +302,7 @@ completed step.
 
 ## AI agent layer
 
-`pgflow/agent` builds durable agents on the engine: provider adapters for
+`anchora/agent` builds durable agents on the engine: provider adapters for
 OpenAI-compatible APIs (including Ollama) and Anthropic, a JSON-schema tool
 registry, and a docker-backed `Sandbox` tool. `agent.Run` drives the
 replay-safe loop — every model call and every tool invocation is a named
@@ -330,8 +329,8 @@ parallel search legs, an approval gate, and provider selection.
 ## Layout
 
 ```
-pgflow/
-  pgflow.go        Engine, Config, registry, execution, shutdown
+anchora/
+  anchora.go        Engine, Config, registry, execution, shutdown
   errors.go        sentinel errors rehydrated with checkpoints
   context.go       workflow context, function-id counter, checkpoint persistence
   step.go          Step, StepCtx, retries, timeouts, heartbeats
@@ -345,7 +344,7 @@ pgflow/
   fork.go          Fork
   patch.go         Patched
   continue.go      ContinueAsNew
-  crash.go         PGFLOW_CRASH_AFTER fault hook
+  crash.go         anchora_CRASH_AFTER fault hook
   metrics.go       Prometheus counters
   messaging.go     Send, Recv
   child.go         Workflow handles, Handle.Result, Child
@@ -356,10 +355,10 @@ pgflow/
   migrations/      schema
   memory/          in-memory Store for tests
   agent/           provider adapters, tool registry, sandbox, agent loop, budgets
-  pgflowvet/       determinism linter (go/analysis) + cmd/pgflowvet
-  pgflowtest/      replay testing helpers
+  anchoravet/       determinism linter (go/analysis) + cmd/anchoravet
+  anchoratest/      replay testing helpers
   serde/           codec interface (JSON default)
-cmd/pgflow/        operator CLI
+cmd/anchora/        operator CLI
 examples/          order (approval + timer), research-agent (durable agent)
 ```
 
@@ -373,9 +372,9 @@ Everything in the plan is implemented except the items below:
 - A read-only web UI — the CLI and `Engine.ListWorkflows` cover the same
   reads.
 - Property-based crash-schedule testing (`rapid`/`gopter`) and a subprocess
-  crash-fuzz harness. Crash injection exists (`PGFLOW_CRASH_AFTER` kills the
+  crash-fuzz harness. Crash injection exists (`anchora_CRASH_AFTER` kills the
   process at a chosen checkpoint), and crash-restart behavior is covered by the
-  shutdown-and-recover tests; the scaffold is in `pgflow/pgflowtest`. A
+  shutdown-and-recover tests; the scaffold is in `anchora/anchoratest`. A
   Firecracker sandbox — `agent.Sandbox` runs Docker only.
 - Deadline enforcement on queued rows (`deadline_at` is recorded; nothing
   acts on it yet).
