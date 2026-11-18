@@ -5,12 +5,6 @@ result is returned. If the process dies, the workflow is re-executed from the
 top: recorded calls replay from the database without repeating side effects,
 and execution resumes at the first call with no recorded result.
 
-Postgres is the only infrastructure dependency. There is no coordinator
-process, no message broker, and no external queue. This repository implements
-[PLAN_V2.md](PLAN_V2.md): the durable-execution core plus queues, events,
-streams, fork, the agent layer, a determinism linter, a CLI, telemetry, and a
-completeness test suite. What is deliberately left out is listed under
-[Scope](#scope).
 
 Requires Go 1.26+ and Postgres 12+. [Architecture](#architecture) has the
 diagrams; [Performance](#performance) has measured numbers, including what a
