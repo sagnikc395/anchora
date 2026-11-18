@@ -1,0 +1,17 @@
+# Scrapes the load generator's /metrics endpoint. anchora registers into the
+# default Prometheus registry, so any process that serves promhttp exports the
+# engine's numbers; point a job at your own app the same way.
+global:
+  scrape_interval: 2s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: anchora
+    static_configs:
+      - targets: ["host.docker.internal:9095"]
+        labels:
+          service: anchora-load
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]

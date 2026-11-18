@@ -63,9 +63,11 @@ func (c *Context) prepare(name string, kind Kind) (int, *Checkpoint, error) {
 	prior := c.history[functionID]
 	c.mu.Unlock()
 	if prior == nil {
+		observeOperation(kind, false)
 		return functionID, nil, nil
 	}
 	if prior.FunctionName != name || prior.Kind != kind {
+		nondeterminism.Inc()
 		return functionID, nil, &NondeterminismError{
 			WorkflowID: c.record.ID,
 			FunctionID: functionID,
@@ -73,6 +75,7 @@ func (c *Context) prepare(name string, kind Kind) (int, *Checkpoint, error) {
 			Actual:     fmt.Sprintf("%s %q", kind, name),
 		}
 	}
+	observeOperation(kind, true)
 	return functionID, prior, nil
 }
 

@@ -167,16 +167,12 @@ func Step[T any](c *Context, name string, fn func(StepCtx) (T, error), opts ...S
 // output, the number of attempts, and the terminal error.
 func (c *Context) runStepAttempts(name string, functionID int, o StepOptions, fn func(StepCtx) ([]byte, error)) ([]byte, int, error) {
 	var output []byte
+	startedAt := time.Now()
 	attempts, err := c.retry(o, func(attempt int) (bool, error) {
 		attemptCtx := c.ctx
 		cancel := context.CancelFunc(func() {})
 		if o.StartToClose > 0 || o.HeartbeatTimeout > 0 {
 			attemptCtx, cancel = context.WithCancel(attemptCtx)
-		}
-		if o.StartToClose > 0 {
-			var cancelTimeout context.CancelFunc
-			attemptCtx, cancelTimeout = context.WithTimeout(attemptCtx, o.StartToClose)
-			defer cancelTimeout()
 		}
 		if o.StartToClose > 0 {
 			var cancelTimeout context.CancelFunc
@@ -222,6 +218,7 @@ func (c *Context) runStepAttempts(name string, functionID int, o StepOptions, fn
 		}
 		return false, err
 	})
+	observeStep(name, attempts, time.Since(startedAt), err)
 	return output, attempts, err
 }
 

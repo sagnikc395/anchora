@@ -12,7 +12,126 @@ streams, fork, the agent layer, a determinism linter, a CLI, telemetry, and a
 completeness test suite. What is deliberately left out is listed under
 [Scope](#scope).
 
-Requires Go 1.26+ and Postgres 12+.
+Requires Go 1.26+ and Postgres 12+. [Architecture](#architecture) has the
+diagrams; [Performance](#performance) has measured numbers, including what a
+`kill -9` costs.
+
+## Architecture
+
+anchora is a library, not a service. The engine runs inside your process and
+Postgres holds every piece of state, so any process that imports the package
+and registers the same workflow names is an interchangeable executor. Scaling
+out means starting another copy; there is nothing else to deploy.
+
+```mermaid
+flowchart TB
+    subgraph proc["Your Go process (one executor, run as many as you like)"]
+        direction TB
+        wf["Workflow function<br/><i>plain Go, deterministic</i>"]
+        api["Engine API<br/>Step · Tx · Sleep · Recv · Child · Go"]
+        wctx["Context<br/><i>function-id counter + preloaded history</i>"]
+        eng["Engine<br/><i>registry · dispatch · shutdown</i>"]
+        sweeps["Background sweeps<br/><i>lease renewal · recovery · dequeue</i>"]
+        store["Store interface"]
+        wf --> api --> wctx --> store
+        eng --> wf
+        sweeps --> store
+        eng --- sweeps
+    end
+
+    subgraph impls["Store implementations"]
+        pg["store_postgres<br/><i>pgx</i>"]
+        mem["memory<br/><i>same fencing rules, for tests</i>"]
+    end
+
+    subgraph db["PostgreSQL — the only dependency"]
+        direction LR
+        t1["workflow_status<br/><i>status · epoch · lease · queue</i>"]
+        t2["operation_outputs<br/><i>the event log</i>"]
+        t3["workflow_io<br/>step_attempts"]
+        t4["notifications · workflow_events<br/>streams · queues"]
+    end
+
+    obs["Prometheus /metrics<br/>OpenTelemetry traces"]
+
+    store --> pg --> db
+    store -.-> mem
+    eng -.-> obs
+    sweeps -.-> obs
+
+    peer["Other executors<br/><i>same binary, same tables</i>"] --> db
+```
+
+The only coupling between executors is the database. A lease column says which
+executor currently owns a workflow and an epoch column settles who wins when
+two of them disagree, which is what lets a crashed executor's work be picked up
+without a coordinator deciding who picks it up.
+
+### Request flow
+
+The path a single workflow takes, including the part that matters: what
+happens when the process holding it dies.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant E as Engine A
+    participant W as Workflow fn
+    participant P as Postgres
+    participant B as Engine B
+
+    C->>E: Research.Start with WorkflowID req-123
+    E->>P: INSERT workflow_status, PENDING at epoch 0
+    Note over P: the id is the idempotency key<br/>a second Start returns this row
+    P-->>E: row
+    E-->>C: Handle
+
+    E->>P: LoadCheckpoints req-123
+    P-->>E: history, empty on a first run
+    E->>W: run with Context
+
+    rect rgb(28,46,36)
+        Note over W,P: every engine call takes a slot
+        W->>W: reserve function_id from the counter
+        W->>W: slot in history? → return recorded value, do not run
+        W->>W: not in history → run the side effect
+        W->>P: INSERT operation_outputs, fenced on epoch,<br/>ON CONFLICT DO NOTHING
+        P-->>W: written, or the winner's recorded value
+        W-->>W: only now is the result returned to the code
+    end
+
+    Note over E,P: lease renewed while the workflow runs
+
+    rect rgb(60,30,30)
+        Note over E: Engine A is SIGKILLed mid-workflow
+        E--xP: lease stops being renewed
+    end
+
+    B->>P: recovery sweep: claim rows whose lease expired
+    P-->>B: req-123 at epoch 1, so A's writes are now fenced out
+    B->>P: LoadCheckpoints req-123
+    P-->>B: every slot A had committed
+    B->>W: re-execute the function from the top
+    Note over W: recorded slots replay from the rows —<br/>no HTTP call, no payment, no LLM spend repeated
+    W->>P: first unrecorded slot runs live, then checkpoints
+    B->>P: UPDATE workflow_status → SUCCESS + output
+    C->>P: Handle.Result polls the row
+    P-->>C: output
+```
+
+Three properties fall out of that shape:
+
+- **A result is observed only after it is durable.** The checkpoint write is
+  before the return, not after, so there is no window where code has a value
+  that Postgres does not.
+- **Two executors cannot both win.** Checkpoint inserts are fenced on the
+  epoch and `ON CONFLICT DO NOTHING` makes the first writer authoritative; the
+  loser adopts the winner's value instead of its own.
+- **Side effects are at-least-once, except in `Tx`.** A crash between running
+  a step and committing its checkpoint repeats that step. `Tx` closes the gap
+  by committing the business write and the checkpoint in one transaction,
+  which makes those exactly-once.
 
 ## Guarantees
 
@@ -203,6 +322,7 @@ go test -race ./...
 
 # Postgres integration tests (they skip without a URL):
 task test-integration      # starts docker compose, then runs everything
+task cover                 # statement coverage including the Postgres-only paths
 ```
 
 Unit tests run entirely on `anchora/memory`, an in-memory `anchora.Store` with
@@ -235,17 +355,158 @@ Recorded steps return their stored values without running; the first slot
 without a recording runs live. A history produced by the old code validates a
 deploy before it ships.
 
-## Benchmarks
+## Performance
 
-Apple M4, in-memory store (the Postgres path adds a row write per step):
+Every number below came from `./cmd/anchora-load` and `./scripts/dashboard-demo.sh`
+on an Apple M4 (10 cores, 24 GB) against Postgres 17 in Docker, both on the
+same machine. Postgres in a Docker VM has a slower `fsync` than a tuned server
+on real hardware, so treat the latency column as a floor to beat, not a
+ceiling. Reproduce them with:
 
+```sh
+task load -- -workflows 3000 -concurrency 16 -steps 5   # throughput and latency
+task bench                                              # in-process Go benchmarks
+task dashboard                                          # the full scenario, rendered
 ```
-BenchmarkCheckpointOverhead/plain-function    0.24 ns/op      (baseline function call)
-BenchmarkCheckpointOverhead/anchora-step       1.8 µs/op       (engine + checkpoint write)
-BenchmarkQueuedWorkflows                      ~2,100 jobs/s    local concurrency 8
+
+### What durability costs
+
+The engine and the database are measured separately, because they are not the
+same order of magnitude:
+
+| | throughput | per checkpointed step |
+| --- | --- | --- |
+| Plain Go function call (no engine) | — | 0.35 ns |
+| Engine with the in-memory store | 575,000 checkpoints/s | 1.9 µs |
+| Engine with Postgres | 4,000 checkpoints/s | 2.4 ms |
+
+The engine is roughly **140× faster than the Postgres it writes to**, so about
+**0.08% of a durable step is anchora and the rest is the commit**. That is the
+intended result for this design: the library should be invisible next to the
+`fsync` that makes the step durable, and it is. It also means the honest answer
+to "how fast is anchora" is "as fast as your Postgres", and tuning effort
+belongs on the database, not here.
+
+### Where it saturates
+
+Throughput against one Postgres, 5 steps per workflow, raising client
+concurrency:
+
+| concurrency | workflows/s | checkpoints/s | p50 | p95 | p99 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 761 | 3,805 | 2.4 ms | 4.1 ms | 6.1 ms |
+| 4 | 842 | 4,211 | 4.8 ms | 6.2 ms | 6.4 ms |
+| 8 | 763 | 3,813 | 9.8 ms | 18.0 ms | 24.9 ms |
+| 16 | 826 | 4,128 | 19.0 ms | 25.2 ms | 38.5 ms |
+| 32 | 807 | 4,033 | 37.7 ms | 50.0 ms | 51.1 ms |
+| 64 | 807 | 4,035 | 74.1 ms | 101.0 ms | 165.4 ms |
+| 128 | 781 | 3,903 | 141.2 ms | 202.3 ms | 344.4 ms |
+
+Throughput is flat at ~800 workflows/s from concurrency 2 onward while latency
+doubles with every doubling of concurrency. That is a saturated system with no
+headroom left: past the knee at about 4 concurrent writers, extra load becomes
+queue depth and nothing else. The useful operating point is the top of that
+table, and the way to move it is a faster disk, a tuned `fsync`, or sharding
+across databases — not more goroutines.
+
+A sustained run holds the same rate: **90,000 workflows and 449,826 durable
+writes in 2m00s, with all 90,000 bodies executing exactly once.**
+
+### What a crash costs
+
+The number that matters for a durable execution engine is not throughput, it
+is what survives `kill -9`. `./scripts/dashboard-demo.sh` starts a batch,
+SIGKILLs the executor holding it, and brings up a fresh one over the same
+workflow ids. How many executions are caught in flight depends on exactly when
+the kill lands, so the counts move between runs; the last column does not:
+
+| | |
+| --- | --- |
+| Executions orphaned by the kill | 219 |
+| Recovered by the new executor | 219 (`anchora_recoveries_total`) |
+| Operations served from recorded history | 1,055 |
+| Operations that re-ran live | 40 |
+| Final state | 600 / 600 `SUCCESS` |
+| Checkpoint rows after recovery | unchanged — no duplicated side effects |
+
+**1,055 of 1,095 operations (96%) replayed from Postgres without re-running.**
+The 40 that ran again were precisely the steps in flight at the instant of the
+kill, which is the at-least-once boundary the design documents: a step that
+has run but not yet committed its checkpoint runs again. `Tx` removes even
+those by committing the business write and the checkpoint together.
+
+### Test suite
+
+| | |
+| --- | --- |
+| Tests | 44, all under `-race` |
+| Statement coverage, engine core | **70.0%** with Postgres, 51.5% without |
+| Statement coverage, determinism linter | 87.0% |
+| Postgres-only paths | `store_postgres.go`, 462 statements, covered only when `anchora_TEST_DATABASE_URL` is set |
+
+The same scenarios run twice, once against `anchora/memory` and once against
+real Postgres, which is what the coverage gap between the two columns is: the
+in-memory store deliberately reimplements the same fencing and
+first-writer-wins rules so the fast suite still exercises them.
+
+## Metrics and dashboards
+
+The engine registers into the default Prometheus registry, so an application
+already serving `promhttp` exports it with no extra wiring:
+
+| Metric | What it answers |
+| --- | --- |
+| `anchora_checkpoint_duration_seconds` | what durability costs right now |
+| `anchora_operations_total{kind,source}` | how many calls ran vs replayed from history |
+| `anchora_workflows_completed_total{workflow,status}` | throughput and failure rate |
+| `anchora_workflow_duration_seconds` | end-to-end execution time |
+| `anchora_step_attempts_total{step,outcome}` | which steps are retrying |
+| `anchora_recoveries_total` | executions claimed from dead executors |
+| `anchora_fenced_total` | writes rejected by a newer epoch |
+| `anchora_nondeterminism_total` | replays whose code no longer matches history — should be flat zero |
+
+A Prometheus and Grafana stack is included, with the dashboard provisioned
+from source:
+
+```sh
+task obs-up                 # Postgres, Prometheus, Grafana, headless renderer
+task dashboard              # drive load, crash an executor, render to docs/img/
+open http://localhost:3000  # dashboard "anchora — durable execution"
 ```
 
-Run with `go test -bench . ./anchora/`.
+The dashboard is provisioned from `deploy/grafana/dashboards/anchora.json`, so
+it is in version control rather than clicked together in a browser, and the
+screenshots below are regenerated by the same command that produces the load.
+
+![anchora Grafana dashboard](docs/img/anchora-dashboard.png)
+
+The script drives the full scenario — steady queued load with injected
+retries, an executor killed mid-flight, then recovery — so the panels show the
+interesting states and not just the happy path.
+
+Throughput and terminal statuses, against the dispatch rate:
+
+![workflow throughput](docs/img/anchora-throughput.png)
+
+Checkpoint write latency, the durability cost in isolation:
+
+![checkpoint write latency](docs/img/anchora-checkpoint-latency.png)
+
+Engine calls split by whether they ran or replayed. Replay sits at zero while
+the fleet is healthy; the small rise after the kill is 1,055 recorded steps
+coming back from Postgres instead of running again. It stays small on purpose
+— replay is what a crash costs, and a crash is rare next to steady load:
+
+![live vs replay](docs/img/anchora-live-vs-replay.png)
+
+Step attempts, where retries are the gap between the success and error lines
+(this run injected a 5% first-attempt failure rate):
+
+![step attempts](docs/img/anchora-step-attempts.png)
+
+Recoveries, the executions claimed from the executor that was killed:
+
+![recoveries](docs/img/anchora-recovery.png)
 
 ## Determinism rules
 
@@ -345,7 +606,7 @@ anchora/
   patch.go         Patched
   continue.go      ContinueAsNew
   crash.go         anchora_CRASH_AFTER fault hook
-  metrics.go       Prometheus counters
+  metrics.go       Prometheus metrics: checkpoints, replays, recoveries, fencing
   messaging.go     Send, Recv
   child.go         Workflow handles, Handle.Result, Child
   recovery.go      recovery sweep and lease renewal
@@ -359,6 +620,9 @@ anchora/
   anchoratest/      replay testing helpers
   serde/           codec interface (JSON default)
 cmd/anchora/        operator CLI
+cmd/anchora-load/   load generator: throughput, latency, fault injection
+deploy/            Prometheus config and provisioned Grafana dashboard
+scripts/           dashboard-demo.sh — drives the scenario the README's numbers come from
 examples/          order (approval + timer), research-agent (durable agent)
 ```
 

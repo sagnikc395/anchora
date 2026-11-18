@@ -7,6 +7,12 @@ services:
       POSTGRES_PASSWORD: anchora
     ports:
       - "5432:5432"
+    command:
+      # The engine's hot path is many small single-row writes, so give it
+      # enough connections to hold a fleet of executors.
+      - postgres
+      - -c
+      - max_connections=200
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -14,6 +20,59 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # --- Observability. Started separately: docker compose --profile obs up -d ---
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: ["obs"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    profiles: ["obs"]
+    environment:
+      DATA_SOURCE_NAME: postgres://anchora:anchora@postgres:5432/anchora?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    profiles: ["obs"]
+    ports:
+      - "3000:3000"
+    environment:
+      # Local-only stack: open it without a login prompt.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_USERS_DEFAULT_THEME: dark
+      # Lets `task bench-screenshots` render panels to PNG headlessly.
+      GF_RENDERING_SERVER_URL: http://grafana-renderer:8081/render
+      GF_RENDERING_CALLBACK_URL: http://grafana:3000/
+      GF_LOG_FILTERS: rendering:debug
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  grafana-renderer:
+    image: grafana/grafana-image-renderer:3.12.1
+    profiles: ["obs"]
+    environment:
+      ENABLE_METRICS: "false"
 
 volumes:
   postgres-data:

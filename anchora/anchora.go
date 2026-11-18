@@ -504,6 +504,14 @@ func (e *Engine) execute(rec WorkflowRecord) {
 		return
 	}
 
+	workflowsStarted.WithLabelValues(rec.Name).Inc()
+	workflowsRunning.Inc()
+	startedAt := time.Now()
+	defer func() {
+		workflowsRunning.Dec()
+		workflowDuration.WithLabelValues(rec.Name).Observe(time.Since(startedAt).Seconds())
+	}()
+
 	spanCtx, span := tracer.Start(runCtx, "anchora.workflow "+rec.Name, trace.WithAttributes(
 		attribute.String("anchora.workflow_id", rec.ID),
 		attribute.Int64("anchora.epoch", rec.Epoch),
@@ -523,6 +531,7 @@ func (e *Engine) execute(rec WorkflowRecord) {
 	}
 	if errors.Is(runErr, ErrFenced) {
 		// Another executor owns the workflow now; its history is canonical.
+		fenced.Inc()
 		return
 	}
 	if errors.Is(runErr, ErrContinueAsNew) {
@@ -541,7 +550,9 @@ func (e *Engine) execute(rec WorkflowRecord) {
 			}
 			if _, err := e.store.CompleteWorkflow(e.ctx, rec.ID, rec.Epoch, StatusSuccess, nil, nil); err != nil {
 				e.logf("anchora: continue workflow %s: %v", rec.ID, err)
+				return
 			}
+			workflowsCompleted.WithLabelValues(rec.Name, string(StatusSuccess)).Inc()
 			return
 		}
 		runErr = fmt.Errorf("anchora: workflow %s returned ErrContinueAsNew without starting one", rec.Name)
@@ -558,7 +569,9 @@ func (e *Engine) execute(rec WorkflowRecord) {
 	}
 	if _, err := e.store.CompleteWorkflow(e.ctx, rec.ID, rec.Epoch, status, output, info); err != nil {
 		e.logf("anchora: complete workflow %s: %v", rec.ID, err)
+		return
 	}
+	workflowsCompleted.WithLabelValues(rec.Name, string(status)).Inc()
 }
 
 // invoke calls the registered function, turning a panic into a workflow error.

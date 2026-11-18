@@ -42,6 +42,46 @@ tasks:
     cmds:
       - go mod tidy
 
+  bench:
+    desc: Run the in-process Go benchmarks
+    cmds:
+      - go test -run '^$' -bench . -benchtime 3s ./anchora/
+
+  load:
+    desc: Drive load through a real Postgres and report throughput and latency
+    env:
+      DATABASE_URL: postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable
+    cmds:
+      - docker compose up -d --wait
+      - go run ./cmd/anchora-load -database-url "$DATABASE_URL" {{.CLI_ARGS}}
+
+  cover:
+    desc: Report statement coverage, including the Postgres-only paths
+    env:
+      anchora_TEST_DATABASE_URL: postgres://anchora:anchora@localhost:5432/anchora?sslmode=disable
+    cmds:
+      - docker compose up -d --wait
+      - go test -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+      - go tool cover -func=coverage.out | tail -1
+
+  obs-up:
+    desc: Start Prometheus and Grafana on top of Postgres
+    cmds:
+      - docker compose up -d --wait
+      - docker compose --profile obs up -d
+      - 'echo "Grafana: http://localhost:3000 — dashboard \"anchora — durable execution\""'
+
+  obs-down:
+    desc: Stop the observability stack
+    cmds:
+      - docker compose --profile obs down
+
+  dashboard:
+    desc: Drive the load/crash/recovery scenario and re-render docs/img/
+    deps: [obs-up]
+    cmds:
+      - ./scripts/dashboard-demo.sh
+
   services-up:
     desc: Start Postgres
     cmds:
