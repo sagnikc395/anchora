@@ -18,9 +18,9 @@ diagrams; [Performance](#performance) has measured numbers, including what a
 
 ## Architecture
 
-anchora is a library, not a service. The engine runs inside your process and
-Postgres holds every piece of state, so any process that imports the package
-and registers the same workflow names is an interchangeable executor. Scaling
+anchora is a library. The engine runs inside your process and Postgres holds
+every piece of state, so any process that imports the package and registers
+the same workflow names is an interchangeable executor. Scaling
 out means starting another copy; there is nothing else to deploy.
 
 ```mermaid
@@ -69,8 +69,8 @@ without a coordinator deciding who picks it up.
 
 ### Request flow
 
-The path a single workflow takes, including the part that matters: what
-happens when the process holding it dies.
+The path a single workflow takes, including what happens when the process
+holding it dies.
 
 ```mermaid
 sequenceDiagram
@@ -120,18 +120,18 @@ sequenceDiagram
     P-->>C: output
 ```
 
-Three properties fall out of that shape:
+Three properties follow from that shape:
 
-- **A result is observed only after it is durable.** The checkpoint write is
-  before the return, not after, so there is no window where code has a value
-  that Postgres does not.
-- **Two executors cannot both win.** Checkpoint inserts are fenced on the
-  epoch and `ON CONFLICT DO NOTHING` makes the first writer authoritative; the
-  loser adopts the winner's value instead of its own.
-- **Side effects are at-least-once, except in `Tx`.** A crash between running
-  a step and committing its checkpoint repeats that step. `Tx` closes the gap
-  by committing the business write and the checkpoint in one transaction,
-  which makes those exactly-once.
+- A result is observed only after it is durable: the checkpoint write happens
+  before the return, so there is no window where code holds a value that
+  Postgres does not.
+- Two executors cannot both win. Checkpoint inserts are fenced on the epoch and
+  `ON CONFLICT DO NOTHING` makes the first writer authoritative. The loser
+  adopts the winner's value.
+- Side effects are at-least-once, except in `Tx`. A crash between running a
+  step and committing its checkpoint repeats that step. `Tx` commits the
+  business write and the checkpoint in one transaction, which makes those steps
+  exactly-once.
 
 ## Guarantees
 
@@ -239,8 +239,8 @@ Step options: `Retry(maxAttempts, initialBackoff, factor)`, `Timeout(d)`,
 `ScheduleToClose`, `MaxBackoff`, and jitter. `StepCtx` embeds
 `context.Context`, exposes `Attempt()`, `IdempotencyKey()`, and
 `Heartbeat(details)`. The heartbeat timeout cancels an attempt that stops
-heartbeating, which catches a wedged activity rather than waiting for the
-start-to-close timeout.
+heartbeating, which catches a wedged activity before the start-to-close
+timeout would.
 
 `TxConn` is the subset of `pgx.Tx` a transaction step receives (`Exec`,
 `Query`, `QueryRow`), so the transaction is the real Postgres transaction that
@@ -306,7 +306,7 @@ enqueueing a duplicate.
 
 - `anchora.Fork(ctx, workflow, sourceID, fromSlot)` copies the source's history
   below the slot and runs live from there: rerun an agent from step 7 without
-  repaying steps 1–6.
+  repaying steps 1 to 6.
 - `anchora.Patched(ctx, "use-new-planner")` returns true for fresh executions
   (recording a marker) and false for replays of older history, letting you add
   behavior while old executions replay their old branch.
@@ -334,7 +334,7 @@ concurrency caps and rate limits, enqueue idempotence across a restart, and
 cancellation. The `agent` package is tested with a scripted provider, its
 actual `Provider` interface.
 
-The integration tests run the same scenarios against real Postgres —
+The integration tests run the same scenarios against real Postgres:
 transactional-step exactly-once, recovery after executor loss, epoch fencing,
 Send/Recv, queues, fork, events and streams, continuations, migration
 idempotency, enqueue idempotence across a restart, and error replay. They run
@@ -360,8 +360,8 @@ deploy before it ships.
 Every number below came from `./cmd/anchora-load` and `./scripts/dashboard-demo.sh`
 on an Apple M4 (10 cores, 24 GB) against Postgres 17 in Docker, both on the
 same machine. Postgres in a Docker VM has a slower `fsync` than a tuned server
-on real hardware, so treat the latency column as a floor to beat, not a
-ceiling. Reproduce them with:
+on real hardware, so the latency column is a floor you can beat on better
+hardware. Reproduce them with:
 
 ```sh
 task load -- -workflows 3000 -concurrency 16 -steps 5   # throughput and latency
@@ -376,16 +376,14 @@ same order of magnitude:
 
 | | throughput | per checkpointed step |
 | --- | --- | --- |
-| Plain Go function call (no engine) | — | 0.35 ns |
+| Plain Go function call (no engine) | n/a | 0.35 ns |
 | Engine with the in-memory store | 575,000 checkpoints/s | 1.9 µs |
 | Engine with Postgres | 4,000 checkpoints/s | 2.4 ms |
 
-The engine is roughly **140× faster than the Postgres it writes to**, so about
-**0.08% of a durable step is anchora and the rest is the commit**. That is the
-intended result for this design: the library should be invisible next to the
-`fsync` that makes the step durable, and it is. It also means the honest answer
-to "how fast is anchora" is "as fast as your Postgres", and tuning effort
-belongs on the database, not here.
+The engine is roughly 140× faster than the Postgres it writes to, so about
+0.08% of a durable step is anchora and the rest is the commit. The library is
+meant to be invisible next to the `fsync` that makes the step durable. anchora
+runs about as fast as your Postgres, so tuning effort belongs on the database.
 
 ### Where it saturates
 
@@ -403,22 +401,23 @@ concurrency:
 | 128 | 781 | 3,903 | 141.2 ms | 202.3 ms | 344.4 ms |
 
 Throughput is flat at ~800 workflows/s from concurrency 2 onward while latency
-doubles with every doubling of concurrency. That is a saturated system with no
-headroom left: past the knee at about 4 concurrent writers, extra load becomes
-queue depth and nothing else. The useful operating point is the top of that
-table, and the way to move it is a faster disk, a tuned `fsync`, or sharding
-across databases — not more goroutines.
+doubles with every doubling of concurrency. The system is saturated: past the
+knee at about 4 concurrent writers, extra load turns into queue depth. The
+useful operating point is the top of that table, and the way to move it is a
+faster disk, a tuned `fsync`, or sharding across databases. More goroutines do
+not help.
 
-A sustained run holds the same rate: **90,000 workflows and 449,826 durable
-writes in 2m00s, with all 90,000 bodies executing exactly once.**
+A sustained run holds the same rate: 90,000 workflows and 449,826 durable
+writes in 2m00s, with all 90,000 bodies executing exactly once.
 
 ### What a crash costs
 
-The number that matters for a durable execution engine is not throughput, it
-is what survives `kill -9`. `./scripts/dashboard-demo.sh` starts a batch,
-SIGKILLs the executor holding it, and brings up a fresh one over the same
-workflow ids. How many executions are caught in flight depends on exactly when
-the kill lands, so the counts move between runs; the last column does not:
+For a durable execution engine, what survives `kill -9` matters more than
+throughput. `./scripts/dashboard-demo.sh` starts a batch, SIGKILLs the executor
+holding it, and brings up a fresh one over the same workflow ids. How many
+executions are caught in flight depends on exactly when the kill lands, so the
+counts move between runs while the final state and the checkpoint rows stay the
+same:
 
 | | |
 | --- | --- |
@@ -427,9 +426,9 @@ the kill lands, so the counts move between runs; the last column does not:
 | Operations served from recorded history | 1,055 |
 | Operations that re-ran live | 40 |
 | Final state | 600 / 600 `SUCCESS` |
-| Checkpoint rows after recovery | unchanged — no duplicated side effects |
+| Checkpoint rows after recovery | unchanged; no duplicated side effects |
 
-**1,055 of 1,095 operations (96%) replayed from Postgres without re-running.**
+1,055 of 1,095 operations (96%) replayed from Postgres without re-running.
 The 40 that ran again were precisely the steps in flight at the instant of the
 kill, which is the at-least-once boundary the design documents: a step that
 has run but not yet committed its checkpoint runs again. `Tx` removes even
@@ -440,14 +439,14 @@ those by committing the business write and the checkpoint together.
 | | |
 | --- | --- |
 | Tests | 44, all under `-race` |
-| Statement coverage, engine core | **70.0%** with Postgres, 51.5% without |
+| Statement coverage, engine core | 70.0% with Postgres, 51.5% without |
 | Statement coverage, determinism linter | 87.0% |
 | Postgres-only paths | `store_postgres.go`, 462 statements, covered only when `anchora_TEST_DATABASE_URL` is set |
 
 The same scenarios run twice, once against `anchora/memory` and once against
-real Postgres, which is what the coverage gap between the two columns is: the
-in-memory store deliberately reimplements the same fencing and
-first-writer-wins rules so the fast suite still exercises them.
+real Postgres; the gap between the two coverage figures is the Postgres-only
+code. The in-memory store reimplements the same fencing and first-writer-wins
+rules, so the fast suite still exercises them.
 
 ## Metrics and dashboards
 
@@ -463,7 +462,7 @@ already serving `promhttp` exports it with no extra wiring:
 | `anchora_step_attempts_total{step,outcome}` | which steps are retrying |
 | `anchora_recoveries_total` | executions claimed from dead executors |
 | `anchora_fenced_total` | writes rejected by a newer epoch |
-| `anchora_nondeterminism_total` | replays whose code no longer matches history — should be flat zero |
+| `anchora_nondeterminism_total` | replays whose code no longer matches history; should be flat zero |
 
 A Prometheus and Grafana stack is included, with the dashboard provisioned
 from source:
@@ -475,14 +474,14 @@ open http://localhost:3000  # dashboard "anchora — durable execution"
 ```
 
 The dashboard is provisioned from `deploy/grafana/dashboards/anchora.json`, so
-it is in version control rather than clicked together in a browser, and the
-screenshots below are regenerated by the same command that produces the load.
+it lives in version control, and the screenshots below are regenerated by the
+same command that produces the load.
 
 ![anchora Grafana dashboard](docs/img/anchora-dashboard.png)
 
-The script drives the full scenario — steady queued load with injected
-retries, an executor killed mid-flight, then recovery — so the panels show the
-interesting states and not just the happy path.
+The script drives the full scenario: steady queued load with injected retries,
+an executor killed mid-flight, then recovery. The panels cover the failure
+states as well as the healthy ones.
 
 Throughput and terminal statuses, against the dispatch rate:
 
@@ -494,8 +493,8 @@ Checkpoint write latency, the durability cost in isolation:
 
 Engine calls split by whether they ran or replayed. Replay sits at zero while
 the fleet is healthy; the small rise after the kill is 1,055 recorded steps
-coming back from Postgres instead of running again. It stays small on purpose
-— replay is what a crash costs, and a crash is rare next to steady load:
+coming back from Postgres instead of running again. Replay is what a crash
+costs, so it stays rare next to steady load:
 
 ![live vs replay](docs/img/anchora-live-vs-replay.png)
 
@@ -516,7 +515,7 @@ Workflow bodies must make the same sequence of engine calls on every replay:
   `math/rand`, and direct id generation;
 - use `anchora.Sleep` instead of `time.Sleep`;
 - wrap every network or database call in `Step` or `Tx`;
-- do not spawn bare goroutines that make engine calls — engine calls are
+- do not spawn bare goroutines that make engine calls; engine calls are
   positional, so start them in program order.
 
 A recorded call is matched by position, kind, and name. Running different code
@@ -549,10 +548,10 @@ completed step.
 
 ## Tooling
 
-- `cmd/anchora` — operator CLI: `list`, `get <id>`, `steps <id>`, `cancel`,
+- `cmd/anchora`, the operator CLI: `list`, `get <id>`, `steps <id>`, `cancel`,
   `resume`, `fork <id> --from <n>`, `gc --older-than 30d`. Reads
   `DATABASE_URL`.
-- `anchora/anchoravet` — a `go/analysis` linter that fails workflow functions
+- `anchora/anchoravet`, a `go/analysis` linter that fails workflow functions
   that call `time.Now`, `math/rand`, `net/http`, `os` env lookups, direct UUID
   generation, or spawn bare goroutines. Step bodies (`StepCtx` first parameter)
   are exempt. Run: `go vet -vettool=$(which anchoravet) ./...`.
@@ -566,9 +565,8 @@ completed step.
 `anchora/agent` builds durable agents on the engine: provider adapters for
 OpenAI-compatible APIs (including Ollama) and Anthropic, a JSON-schema tool
 registry, and a docker-backed `Sandbox` tool. `agent.Run` drives the
-replay-safe loop — every model call and every tool invocation is a named
-step — so a crash mid-loop resumes at the exact call without repeating paid
-work:
+replay-safe loop. Every model call and every tool invocation is a named step,
+so a crash mid-loop resumes at the exact call without repeating paid work:
 
 ```go
 messages := []agent.Message{{Role: agent.RoleUser, Content: task}}
@@ -630,16 +628,15 @@ examples/          order (approval + timer), research-agent (durable agent)
 
 Everything in the plan is implemented except the items below:
 
-- `pg_notify` triggers plus `LISTEN` waiters for messages and events —
+- `pg_notify` triggers plus `LISTEN` waiters for messages and events.
   `Recv`/`GetEvent` poll instead; the plan lists polling as the accepted
   fallback.
-- A read-only web UI — the CLI and `Engine.ListWorkflows` cover the same
-  reads.
+- A read-only web UI. The CLI and `Engine.ListWorkflows` cover the same reads.
 - Property-based crash-schedule testing (`rapid`/`gopter`) and a subprocess
   crash-fuzz harness. Crash injection exists (`anchora_CRASH_AFTER` kills the
   process at a chosen checkpoint), and crash-restart behavior is covered by the
-  shutdown-and-recover tests; the scaffold is in `anchora/anchoratest`. A
-  Firecracker sandbox — `agent.Sandbox` runs Docker only.
+  shutdown-and-recover tests; the scaffold is in `anchora/anchoratest`.
+- A Firecracker sandbox. `agent.Sandbox` runs Docker only.
 - Deadline enforcement on queued rows (`deadline_at` is recorded; nothing
   acts on it yet).
 
